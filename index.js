@@ -12,6 +12,10 @@ app.use(cors({
 }));
 app.use(express.json());
 
+app.get("/", (req, res) => {
+  res.send("Welcome to the backend of modal payment");
+});
+
 // CREATE CHECKOUT SESSION
 app.post("/create-checkout-session", async (req, res) => {
   try {
