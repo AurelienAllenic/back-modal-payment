@@ -17,7 +17,7 @@ app.get("/", (req, res) => {
 });
 
 // CREATE CHECKOUT SESSION
-app.post("/create-checkout-session", async (req, res) => {
+app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
 
@@ -44,7 +44,7 @@ app.post("/create-checkout-session", async (req, res) => {
 });
 
 // RETRIEVE SESSION (pour la page /success)
-app.get("/retrieve-session", async (req, res) => {
+app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
     if (!session_id) {
