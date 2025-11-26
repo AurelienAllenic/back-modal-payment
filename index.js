@@ -43,7 +43,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity }],
       mode: "payment",
-      success_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/success?session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `https://modal-payment.vercel.app/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/cancel`,
       customer_email: customerEmail || undefined,
       metadata,
