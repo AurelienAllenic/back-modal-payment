@@ -9,8 +9,9 @@ const app = express();
 // CORS – accepte TOUS les domaines vercel.app (prod + previews + branches)
 const allowedOrigins = [
   "https://modal-payment.vercel.app",
-  // tous les sous-domaines vercel.app → c'est ÇA qui manquait avant
-  /^(https?:\/\/)[a-zA-Z0-9-]+\.vercel\.app$/,
+  // Accepte TOUS les déploiements Vercel : prod + preview + git branches
+  /\.vercel\.app$/,                     // ← CORRECT
+  /http:\/\/localhost[:\d]*/,           // localhost
 ];
 
 const corsOptions = {
