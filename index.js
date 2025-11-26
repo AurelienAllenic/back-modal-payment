@@ -6,27 +6,30 @@ const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-// 1. CORS : on ajoute ton domaine prod + TOUS les previews Vercel
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "http://127.0.0.1:5173",
-      "http://localhost:5174",
-      "https://modal-payment.vercel.app",
-      // Cette ligne accepte TOUS les sous-domaines vercel.app (preview, branches, etc.)
-      /.+\.vercel\.app$/,
-    ],
-    credentials: true,
-  })
-);
+// ────────────────── CORS ──────────────────
+const corsOptions = {
+  origin: [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "https://modal-payment.vercel.app",
+    // Accepte TOUS les sous-domaines vercel.app (preview + prod + branches)
+    /.+\.vercel\.app$/,
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200,
+};
 
-// 2. LIGNE ABSOLUMENT OBLIGATOIRE POUR QUE LE PREFLIGHT MARCHE SUR VERCEL
-app.options("*", cors());
+// Middleware créé une seule fois → gère le preflight automatiquement
+const corsMiddleware = cors(corsOptions);
 
-// Parse JSON
+app.use(corsMiddleware);
+// SUPPRIME CETTE LIGNE QUI CAUSE LE CRASH : app.options("*", corsMiddleware);
+
+// ────────────────── BODY ──────────────────
 app.use(express.json());
 
+// ────────────────── ROUTES ──────────────────
 app.get("/", (req, res) => {
   res.send("Backend Stripe Vercel OK");
 });
@@ -40,7 +43,6 @@ app.post("/api/create-checkout-session", async (req, res) => {
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity }],
       mode: "payment",
-      // Utilise l'origin réel du frontend (fonctionne en preview + prod)
       success_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/cancel`,
       customer_email: customerEmail || undefined,
@@ -71,12 +73,10 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
-// Pour le local seulement
+// ────────────────── LOCAL + VERCEL ──────────────────
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => console.log(`Local: http://localhost:${PORT}`));
 
-// LIGNE MAGIQUE N°1
+// LIGNES MAGIQUES OBLIGATOIRES
 module.exports = app;
-
-// Si jamais Vercel a besoin d'une fonction handler (certains cas rares)
-module.exports.handler = app;
+module.exports.handler = app; // au cas où
