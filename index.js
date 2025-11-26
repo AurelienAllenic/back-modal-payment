@@ -6,30 +6,30 @@ const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-// ────────────────── CORS (corrigé mais identique à ton esprit) ──────────────────
+// ────────────────── CORS ──────────────────
 const corsOptions = {
   origin: [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "https://modal-payment.vercel.app",
-    // Accepte TOUS les sous-domaines vercel.app (preview + prod)
+    // Accepte TOUS les sous-domaines vercel.app (preview + prod + branches)
     /.+\.vercel\.app$/,
   ],
   credentials: true,
   optionsSuccessStatus: 200,
 };
 
-// ON CRÉE LE MIDDLEWARE UNE SEULE FOIS (c’est la clé !)
+// Middleware créé une seule fois → c’est ÇA qui fait que le preflight marche
 const corsMiddleware = cors(corsOptions);
 
 app.use(corsMiddleware);
-// CETTE LIGNE ÉTAIT FAUSSE AVANT → maintenant on passe la même instance
-app.options("*", corsMiddleware);  // ← CORRIGÉ ICI
+app.options("*", corsMiddleware); // ← même instance → header présent à 100%
 
-// Parse JSON
+// ────────────────── BODY ──────────────────
 app.use(express.json());
 
+// ────────────────── ROUTES ──────────────────
 app.get("/", (req, res) => {
   res.send("Backend Stripe Vercel OK");
 });
@@ -56,7 +56,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
   }
 });
 
-// RETRIEVE SESSION
+// RETRIEVE SESSION → TA ROUTE EST BIEN LÀ
 app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
@@ -73,10 +73,10 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
-// Pour le local seulement
+// ────────────────── LOCAL + VERCEL ──────────────────
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => console.log(`Local: http://localhost:${PORT}`));
 
-// LIGNES MAGIQUES (tu les avais déjà, on les garde)
+// LIGNES MAGIQUES OBLIGATOIRES
 module.exports = app;
-module.exports.handler = app; // au cas où
+module.exports.handler = app; // au cas où Vercel soit capricieux
