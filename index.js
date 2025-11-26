@@ -6,30 +6,27 @@ const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-// ────────────────── CORS ──────────────────
-const corsOptions = {
-  origin: [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "https://modal-payment.vercel.app",
-    // Accepte TOUS les sous-domaines vercel.app (preview + prod + branches)
-    /.+\.vercel\.app$/,
-  ],
-  credentials: true,
-  optionsSuccessStatus: 200,
-};
+// 1. CORS : on ajoute ton domaine prod + TOUS les previews Vercel
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "http://localhost:5174",
+      "https://modal-payment.vercel.app",
+      // Cette ligne accepte TOUS les sous-domaines vercel.app (preview, branches, etc.)
+      /.+\.vercel\.app$/,
+    ],
+    credentials: true,
+  })
+);
 
-// Middleware créé une seule fois → c’est ÇA qui fait que le preflight marche
-const corsMiddleware = cors(corsOptions);
+// 2. LIGNE ABSOLUMENT OBLIGATOIRE POUR QUE LE PREFLIGHT MARCHE SUR VERCEL
+app.options("*", cors());
 
-app.use(corsMiddleware);
-app.options("*", corsMiddleware); // ← même instance → header présent à 100%
-
-// ────────────────── BODY ──────────────────
+// Parse JSON
 app.use(express.json());
 
-// ────────────────── ROUTES ──────────────────
 app.get("/", (req, res) => {
   res.send("Backend Stripe Vercel OK");
 });
@@ -43,6 +40,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity }],
       mode: "payment",
+      // Utilise l'origin réel du frontend (fonctionne en preview + prod)
       success_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/cancel`,
       customer_email: customerEmail || undefined,
@@ -56,7 +54,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
   }
 });
 
-// RETRIEVE SESSION → TA ROUTE EST BIEN LÀ
+// RETRIEVE SESSION
 app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
@@ -73,10 +71,12 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
-// ────────────────── LOCAL + VERCEL ──────────────────
+// Pour le local seulement
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => console.log(`Local: http://localhost:${PORT}`));
 
-// LIGNES MAGIQUES OBLIGATOIRES
+// LIGNE MAGIQUE N°1
 module.exports = app;
-module.exports.handler = app; // au cas où Vercel soit capricieux
+
+// Si jamais Vercel a besoin d'une fonction handler (certains cas rares)
+module.exports.handler = app;
