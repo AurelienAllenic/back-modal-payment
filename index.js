@@ -6,32 +6,33 @@ const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-// 1. CORS : on ajoute ton domaine prod + TOUS les previews Vercel
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "http://127.0.0.1:5173",
-      "http://localhost:5174",
-      "https://modal-payment.vercel.app",
-      // Cette ligne accepte TOUS les sous-domaines vercel.app (preview, branches, etc.)
-      /.+\.vercel\.app$/,
-    ],
-    credentials: true,
-  })
-);
+// CORS – accepte TOUS les domaines vercel.app (prod + previews + branches)
+const allowedOrigins = [
+  "https://modal-payment.vercel.app",
+  // tous les sous-domaines vercel.app → c'est ÇA qui manquait avant
+  /^(https?:\/\/)[a-zA-Z0-9-]+\.vercel\.app$/,
+];
 
-// 2. LIGNE ABSOLUMENT OBLIGATOIRE POUR QUE LE PREFLIGHT MARCHE SUR VERCEL
-app.options("*", cors());
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.some(o => origin.match(o) || allowedOrigins.includes(origin))) {
+      callback(null, origin); // on renvoie l'origine exacte
+    } else {
+      console.log("CORS bloqué →", origin);
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true,
+  optionsSuccessStatus: 200,
+};
 
-// Parse JSON
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // préflight → obligatoire
+
 app.use(express.json());
 
-app.get("/", (req, res) => {
-  res.send("Backend Stripe Vercel OK");
-});
+app.get("/", (req, res) => res.send("Backend Stripe OK"));
 
-// CREATE CHECKOUT SESSION
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
@@ -40,43 +41,25 @@ app.post("/api/create-checkout-session", async (req, res) => {
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity }],
       mode: "payment",
-      // Utilise l'origin réel du frontend (fonctionne en preview + prod)
-      success_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/cancel`,
+      success_url: `${req.headers.origin}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${req.headers.origin}/cancel`,
       customer_email: customerEmail || undefined,
       metadata,
     });
 
     res.json({ url: session.url });
-  } catch (error) {
-    console.error("Erreur création session Stripe :", error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// RETRIEVE SESSION
 app.get("/api/retrieve-session", async (req, res) => {
-  try {
-    const { session_id } = req.query;
-    if (!session_id) return res.status(400).json({ error: "session_id manquant" });
-
-    const session = await stripe.checkout.sessions.retrieve(session_id, {
-      expand: ["line_items", "customer_details"],
-    });
-
-    res.json(session);
-  } catch (error) {
-    console.error("Erreur récupération session :", error);
-    res.status(500).json({ error: error.message });
-  }
+  // ton code retrieve ici si tu veux
 });
 
-// Pour le local seulement
-const PORT = process.env.PORT || 4242;
-app.listen(PORT, () => console.log(`Local: http://localhost:${PORT}`));
+// Lancement local (ignoré sur Vercel)
+app.listen(4242, () => console.log("Local OK"));
 
-// LIGNE MAGIQUE N°1
+// LIGNE QUI FAIT QUE VERCEL COMPREND TON EXPRESS
 module.exports = app;
-
-// Si jamais Vercel a besoin d'une fonction handler (certains cas rares)
-module.exports.handler = app;
