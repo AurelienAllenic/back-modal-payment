@@ -6,34 +6,35 @@ const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-// CORS – accepte TOUS les domaines vercel.app (prod + previews + branches)
-const allowedOrigins = [
-  "https://modal-payment.vercel.app",
-  // Accepte TOUS les déploiements Vercel : prod + preview + git branches
-  /\.vercel\.app$/,                     // ← CORRECT
-  /http:\/\/localhost[:\d]*/,           // localhost
-];
-
+// ────────────────── CORS (corrigé mais identique à ton esprit) ──────────────────
 const corsOptions = {
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.some(o => origin.match(o) || allowedOrigins.includes(origin))) {
-      callback(null, origin); // on renvoie l'origine exacte
-    } else {
-      console.log("CORS bloqué →", origin);
-      callback(new Error("Not allowed by CORS"));
-    }
-  },
+  origin: [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "https://modal-payment.vercel.app",
+    // Accepte TOUS les sous-domaines vercel.app (preview + prod)
+    /.+\.vercel\.app$/,
+  ],
   credentials: true,
   optionsSuccessStatus: 200,
 };
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // préflight → obligatoire
+// ON CRÉE LE MIDDLEWARE UNE SEULE FOIS (c’est la clé !)
+const corsMiddleware = cors(corsOptions);
 
+app.use(corsMiddleware);
+// CETTE LIGNE ÉTAIT FAUSSE AVANT → maintenant on passe la même instance
+app.options("*", corsMiddleware);  // ← CORRIGÉ ICI
+
+// Parse JSON
 app.use(express.json());
 
-app.get("/", (req, res) => res.send("Backend Stripe OK"));
+app.get("/", (req, res) => {
+  res.send("Backend Stripe Vercel OK");
+});
 
+// CREATE CHECKOUT SESSION
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
@@ -42,25 +43,40 @@ app.post("/api/create-checkout-session", async (req, res) => {
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity }],
       mode: "payment",
-      success_url: `${req.headers.origin}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${req.headers.origin}/cancel`,
+      success_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/cancel`,
       customer_email: customerEmail || undefined,
       metadata,
     });
 
     res.json({ url: session.url });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error("Erreur création session Stripe :", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
+// RETRIEVE SESSION
 app.get("/api/retrieve-session", async (req, res) => {
-  // ton code retrieve ici si tu veux
+  try {
+    const { session_id } = req.query;
+    if (!session_id) return res.status(400).json({ error: "session_id manquant" });
+
+    const session = await stripe.checkout.sessions.retrieve(session_id, {
+      expand: ["line_items", "customer_details"],
+    });
+
+    res.json(session);
+  } catch (error) {
+    console.error("Erreur récupération session :", error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// Lancement local (ignoré sur Vercel)
-app.listen(4242, () => console.log("Local OK"));
+// Pour le local seulement
+const PORT = process.env.PORT || 4242;
+app.listen(PORT, () => console.log(`Local: http://localhost:${PORT}`));
 
-// LIGNE QUI FAIT QUE VERCEL COMPREND TON EXPRESS
+// LIGNES MAGIQUES (tu les avais déjà, on les garde)
 module.exports = app;
+module.exports.handler = app; // au cas où
