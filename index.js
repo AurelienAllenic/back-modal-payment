@@ -8,62 +8,49 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
 // ────────────────── CORS ──────────────────
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "http://localhost:5174",
-      "https://modal-payment.vercel.app",
-      /\.vercel\.app$/,
-    ],
-    credentials: true,
-  })
-);
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://modal-payment.vercel.app",
+    /\.vercel\.app$/,
+  ],
+  credentials: true,
+}));
 
 // ────────────────── BODY PARSING ──────────────────
-// UNIQUEMENT pour les routes normales → JSON
+// Raw body UNIQUEMENT pour le webhook (doit être AVANT express.json)
+app.use("/webhook", express.raw({ type: "application/json" }));
+
+// JSON pour toutes les autres routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ────────────────── CONNEXION MONGODB ──────────────────
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => console.log("MongoDB connecté avec succès"))
-  .catch((err) => {
-    console.error("Erreur connexion MongoDB :", err.message);
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connecté"))
+  .catch(err => {
+    console.error("Erreur MongoDB :", err.message);
     process.exit(1);
   });
 
 // ────────────────── MODÈLE ORDER ──────────────────
-const orderSchema = new mongoose.Schema(
-  {
-    stripeSessionId: { type: String, required: true, unique: true },
-    orderNumber: { type: String, unique: true },
-    paymentStatus: {
-      type: String,
-      enum: ["pending", "paid", "failed", "refunded"],
-      default: "paid",
-    },
-    amountTotal: { type: Number, required: true },
-    currency: { type: String, default: "eur" },
-    customer: {
-      name: String,
-      email: { type: String, lowercase: true },
-      phone: String,
-    },
-    type: { type: String, enum: ["traineeship", "show", "courses"], required: true },
-    metadata: mongoose.Schema.Types.Mixed,
-    event: { title: String, place: String, date: String, hours: String },
-  },
-  { timestamps: true }
-);
+const orderSchema = new mongoose.Schema({
+  stripeSessionId: { type: String, required: true, unique: true },
+  orderNumber: { type: String, unique: true },
+  paymentStatus: { type: String, enum: ["pending", "paid", "failed", "refunded"], default: "paid" },
+  amountTotal: { type: Number, required: true },
+  currency: { type: String, default: "eur" },
+  customer: { name: String, email: { type: String, lowercase: true }, phone: String },
+  type: { type: String, enum: ["traineeship", "show", "courses"], required: true },
+  metadata: mongoose.Schema.Types.Mixed,
+  event: { title: String, place: String, date: String, hours: String },
+}, { timestamps: true });
 
 orderSchema.pre("save", async function (next) {
   if (!this.orderNumber && this.isNew) {
     const year = new Date().getFullYear();
-    const count = await this.constructor.countDocuments({
-      createdAt: { $gte: new Date(`${year}-01-01`) },
-    });
+    const count = await this.constructor.countDocuments({ createdAt: { $gte: new Date(`${year}-01-01`) } });
     this.orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
   }
   next();
@@ -72,27 +59,19 @@ orderSchema.pre("save", async function (next) {
 const Order = mongoose.model("Order", orderSchema);
 
 // ────────────────── ROUTES ──────────────────
-app.get("/", (req, res) => res.send("Backend Stripe + MongoDB OK"));
+app.get("/", (req, res) => res.send("Backend OK"));
 
-// Créer session
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
-
-    if (!priceId) {
-      return res.status(400).json({ error: "priceId manquant" });
-    }
+    if (!priceId) return res.status(400).json({ error: "priceId manquant" });
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity }],
       mode: "payment",
-      success_url: `${
-        process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
-      }/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${
-        process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
-      }/cancel`,
+      success_url: `${process.env.FRONTEND_URL || "https://modal-payment.vercel.app"}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL || "https://modal-payment.vercel.app"}/cancel`,
       customer_email: customerEmail || undefined,
       metadata,
     });
@@ -104,7 +83,6 @@ app.post("/api/create-checkout-session", async (req, res) => {
   }
 });
 
-// Récupérer commande
 app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
@@ -133,27 +111,23 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
-// WEBHOOK — C’EST LA SEULE ROUTE QUI DOIT ÊTRE EN RAW
-app.post(
-  "/webhook",
-  express.raw({ type: "application/json" }), // ← uniquement ici
-  async (req, res) => {
-    const sig = req.headers["stripe-signature"];
+// ────────────────── WEBHOOK ──────────────────
+app.post("/webhook", (req, res) => {
+  const sig = req.headers["stripe-signature"];
 
-    try {
-      const event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
+  try {
+    const event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
 
-      if (event.type === "checkout.session.completed") {
-        const session = event.data.object;
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
 
+      (async () => {
         const exists = await Order.findOne({ stripeSessionId: session.id });
-        if (exists) {
-          return res.json({ received: true });
-        }
+        if (exists) return;
 
         const metadata = session.metadata || {};
         const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
@@ -171,26 +145,24 @@ app.post(
           },
           type: metadata.type,
           metadata,
-          event: singleEvent
-            ? {
-                title: singleEvent.title,
-                place: singleEvent.place,
-                date: singleEvent.date,
-                hours: singleEvent.hours,
-              }
-            : null,
+          event: singleEvent ? {
+            title: singleEvent.title,
+            place: singleEvent.place,
+            date: singleEvent.date,
+            hours: singleEvent.hours,
+          } : null,
         }).save();
 
-        console.log(`Commande créée → ${session.id}`);
-      }
-
-      res.json({ received: true });
-    } catch (err) {
-      console.error("Webhook error:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
+        console.log(`Commande créée avec succès → ${session.id}`);
+      })();
     }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+    res.status(400).send(`Webhook Error: ${err.message}`);
   }
-);
+});
 
 // ────────────────── LANCEMENT ──────────────────
 const PORT = process.env.PORT || 4242;
