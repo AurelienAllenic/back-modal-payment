@@ -102,6 +102,43 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
+// ────────────────── LISTE TOUTES LES COMMANDES ──────────────────
+app.get("/api/orders", async (req, res) => {
+  try {
+    const orders = await Order.find({})
+      .sort({ createdAt: -1 }) // plus récent en haut
+      .select("-__v") // on enlève les champs inutiles
+      .lean(); // plus rapide
+
+    res.json({
+      success: true,
+      count: orders.length,
+      data: orders.map(order => ({
+        id: order._id,
+        orderNumber: order.orderNumber || "—",
+        stripeSessionId: order.stripeSessionId,
+        date: new Date(order.createdAt).toLocaleDateString("fr-FR", {
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit"
+        }),
+        amount: (order.amountTotal / 100).toFixed(2) + " €",
+        customer: order.customer?.name || "Anonyme",
+        email: order.customer?.email || "—",
+        phone: order.customer?.phone || "—",
+        type: order.type,
+        eventTitle: order.event?.title || "—",
+        status: order.paymentStatus
+      }))
+    });
+  } catch (error) {
+    console.error("Erreur /api/orders :", error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ────────────────── WEBHOOK ──────────────────
 app.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
