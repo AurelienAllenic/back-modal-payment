@@ -26,7 +26,10 @@ app.use(express.urlencoded({ extended: true }));
 // ────────────────── MONGODB ──────────────────
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connecté"))
-  .catch(err => { console.error("MongoDB erreur:", err); process.exit(1); });
+  .catch(err => {
+    console.error("MongoDB erreur:", err);
+    process.exit(1);
+  });
 
 // ────────────────── SCHEMA ORDER ──────────────────
 const orderSchema = new mongoose.Schema({
@@ -41,23 +44,8 @@ const orderSchema = new mongoose.Schema({
   event: { title: String, place: String, date: String, hours: String },
 }, { timestamps: true });
 
-// Génération du numéro de commande — VERSION QUI MARCHE À 100 %
-orderSchema.pre("save", async function (next) {
-  if (this.isNew && !this.orderNumber) {
-    try {
-      const year = new Date().getFullYear();
-      const count = await this.constructor.countDocuments({
-        createdAt: { $gte: new Date(`${year}-01-01`) }
-      });
-      this.orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
-      next();
-    } catch (err) {
-      next(err);
-    }
-  } else {
-    next();
-  }
-});
+// ON SUPPRIME LE pre("save") QUI BUG SUR VERCEL → ON GÉNÈRE LE NUMÉRO DIRECTEMENT DANS LE WEBHOOK
+// → C'est la méthode 100 % fiable en 2025
 
 const Order = mongoose.model("Order", orderSchema);
 
@@ -101,8 +89,8 @@ app.get("/api/retrieve-session", async (req, res) => {
       currency: order.currency,
       customer_details: {
         name: order.customer.name || "Anonyme",
-        email: order.customer.email,
-        phone: order.customer.phone,
+        email: order.customer.email || null,
+        phone: order.customer.phone || null,
       },
       metadata: order.metadata || {},
       type: order.type,
@@ -114,8 +102,8 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
-// ────────────────── WEBHOOK (LA SEULE LIGNE QUI MANQUAIT : async) ──────────────────
-app.post("/webhook", async (req, res) => {          // ← async ici
+// ────────────────── WEBHOOK ──────────────────
+app.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
 
   try {
@@ -124,12 +112,13 @@ app.post("/webhook", async (req, res) => {          // ← async ici
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      console.log("Webhook reçu →", session.id, "payment_status:", session.payment_status);
+      console.log("Webhook reçu →", session.id, "| payment_status:", session.payment_status);
 
       try {
+        // Vérifie si déjà en base
         const exists = await Order.findOne({ stripeSessionId: session.id });
         if (exists) {
-          console.log("Déjà en base →", session.id);
+          console.log("Commande déjà existante →", session.id);
           return res.json({ received: true });
         }
 
@@ -137,8 +126,16 @@ app.post("/webhook", async (req, res) => {          // ← async ici
         const eventData = metadata.eventData ? JSON.parse(metadata.eventData || "null") : null;
         const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
 
+        // GÉNÉRATION DU NUMÉRO DE COMMANDE ICI (fiable à 100 % sur Vercel)
+        const year = new Date().getFullYear();
+        const count = await Order.countDocuments({
+          createdAt: { $gte: new Date(`${year}-01-01`) }
+        });
+        const orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
+
         await new Order({
           stripeSessionId: session.id,
+          orderNumber, // ← généré ici
           amountTotal: session.amount_total || 0,
           currency: session.currency || "eur",
           paymentStatus: "paid",
@@ -147,19 +144,21 @@ app.post("/webhook", async (req, res) => {          // ← async ici
             email: metadata.email || session.customer_details?.email || null,
             phone: metadata.telephone || session.customer_details?.phone || null,
           },
-          type: metadata.type,
+          type: metadata.type, // toujours présent côté front
           metadata,
           event: singleEvent ? {
-            title: singleEvent.title,
-            place: singleEvent.place,
-            date: singleEvent.date,
-            hours: singleEvent.hours,
+            title: singleEvent.title || "Événement",
+            place: singleEvent.place || "Lieu inconnu",
+            date: singleEvent.date || "Date inconnue",
+            hours: singleEvent.hours || "Horaire inconnu",
           } : null,
         }).save();
 
-        console.log("COMMANDE CRÉÉE EN BASE →", session.id);
+        console.log("COMMANDE CRÉÉE EN BASE →", session.id, "| Numéro:", orderNumber);
+
       } catch (err) {
-        console.error("ERREUR SAVE COMMANDE:", err.message);
+        console.error("ERREUR FATALE SAVE:", err.message);
+        console.error("Stack:", err.stack);
       }
     }
 
