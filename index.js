@@ -8,52 +8,66 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
 // ────────────────── CORS ──────────────────
-app.use(cors({
-  origin: [
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "https://modal-payment.vercel.app",
-    /\.vercel\.app$/,
-  ],
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "http://localhost:5174",
+      "https://modal-payment.vercel.app",
+      /\.vercel\.app$/,
+    ],
+    credentials: true,
+  })
+);
 
 // ────────────────── BODY PARSING ──────────────────
-// Raw body UNIQUEMENT pour le webhook (doit être AVANT express.json)
-app.use("/webhook", express.raw({ type: "application/json" }));
-
-// JSON pour toutes les autres routes
-app.use(express.json());
+app.use("/webhook", express.raw({ type: "application/json" })); // webhook en raw
+app.use(express.json()); // tout le reste en JSON
 app.use(express.urlencoded({ extended: true }));
 
 // ────────────────── CONNEXION MONGODB ──────────────────
-mongoose.connect(process.env.MONGO_URI)
+mongoose
+  .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connecté"))
-  .catch(err => {
+  .catch((err) => {
     console.error("Erreur MongoDB :", err.message);
     process.exit(1);
   });
 
 // ────────────────── MODÈLE ORDER ──────────────────
-const orderSchema = new mongoose.Schema({
-  stripeSessionId: { type: String, required: true, unique: true },
-  orderNumber: { type: String, unique: true },
-  paymentStatus: { type: String, enum: ["pending", "paid", "failed", "refunded"], default: "paid" },
-  amountTotal: { type: Number, required: true },
-  currency: { type: String, default: "eur" },
-  customer: { name: String, email: { type: String, lowercase: true }, phone: String },
-  type: { type: String, enum: ["traineeship", "show", "courses"], required: true },
-  metadata: mongoose.Schema.Types.Mixed,
-  event: { title: String, place: String, date: String, hours: String },
-}, { timestamps: true });
+const orderSchema = new mongoose.Schema(
+  {
+    stripeSessionId: { type: String, required: true, unique: true },
+    orderNumber: { type: String, unique: true },
+    paymentStatus: {
+      type: String,
+      enum: ["pending", "paid", "failed", "refunded"],
+      default: "paid",
+    },
+    amountTotal: { type: Number, required: true },
+    currency: { type: String, default: "eur" },
+    customer: {
+      name: String,
+      email: { type: String, lowercase: true },
+      phone: String,
+    },
+    type: { type: String, enum: ["traineeship", "show", "courses"], required: true },
+    metadata: mongoose.Schema.Types.Mixed,
+    event: { title: String, place: String, date: String, hours: String },
+  },
+  { timestamps: true }
+);
 
+// Génération du numéro de commande → CORRIGÉ (next bien passé)
 orderSchema.pre("save", async function (next) {
   if (!this.orderNumber && this.isNew) {
     const year = new Date().getFullYear();
-    const count = await this.constructor.countDocuments({ createdAt: { $gte: new Date(`${year}-01-01`) } });
+    const count = await this.constructor.countDocuments({
+      createdAt: { $gte: new Date(`${year}-01-01`) },
+    });
     this.orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
   }
-  next();
+  next(); // OBLIGATOIRE
 });
 
 const Order = mongoose.model("Order", orderSchema);
@@ -126,34 +140,40 @@ app.post("/webhook", (req, res) => {
       const session = event.data.object;
 
       (async () => {
-        const exists = await Order.findOne({ stripeSessionId: session.id });
-        if (exists) return;
+        try {
+          const exists = await Order.findOne({ stripeSessionId: session.id });
+          if (exists) return;
 
-        const metadata = session.metadata || {};
-        const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
-        const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
+          const metadata = session.metadata || {};
+          const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
+          const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
 
-        await new Order({
-          stripeSessionId: session.id,
-          amountTotal: session.amount_total,
-          currency: session.currency || "eur",
-          paymentStatus: session.payment_status === "succeeded" ? "paid" : session.payment_status,
-          customer: {
-            name: metadata.nom || session.customer_details?.name || "Anonyme",
-            email: metadata.email || session.customer_details?.email || null,
-            phone: metadata.telephone || session.customer_details?.phone || null,
-          },
-          type: metadata.type,
-          metadata,
-          event: singleEvent ? {
-            title: singleEvent.title,
-            place: singleEvent.place,
-            date: singleEvent.date,
-            hours: singleEvent.hours,
-          } : null,
-        }).save();
+          await new Order({
+            stripeSessionId: session.id,
+            amountTotal: session.amount_total,
+            currency: session.currency || "eur",
+            paymentStatus: session.payment_status === "succeeded" ? "paid" : session.payment_status,
+            customer: {
+              name: metadata.nom || session.customer_details?.name || "Anonyme",
+              email: metadata.email || session.customer_details?.email || null,
+              phone: metadata.telephone || session.customer_details?.phone || null,
+            },
+            type: metadata.type,
+            metadata,
+            event: singleEvent
+              ? {
+                  title: singleEvent.title,
+                  place: singleEvent.place,
+                  date: singleEvent.date,
+                  hours: singleEvent.hours,
+                }
+              : null,
+          }).save();
 
-        console.log(`Commande créée avec succès → ${session.id}`);
+          console.log(`Commande créée → ${session.id}`);
+        } catch (err) {
+          console.error("Erreur lors de la sauvegarde de la commande :", err);
+        }
       })();
     }
 
