@@ -8,22 +8,25 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
 // ────────────────── CORS ──────────────────
-app.use(cors({
-  origin: [
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "https://modal-payment.vercel.app",
-    /\.vercel\.app$/,
-  ],
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "http://localhost:5174",
+      "https://modal-payment.vercel.app",
+      /\.vercel\.app$/,
+    ],
+    credentials: true,
+  })
+);
 
 // ────────────────── BODY PARSING ──────────────────
 // Important : webhook DOIT être avant express.json()
-app.use(express.json({ verify: (req, res, buf) => (req.rawBody = buf) })); // pour le webhook
+app.use(express.raw({ type: "application/json" })); // pour le webhook uniquement
+app.use(express.json()); // pour toutes les autres routes
 app.use(express.urlencoded({ extended: true }));
 
-// ────────────────── CONNEXION MONGODB (version 2025) ──────────────────
+// ────────────────── CONNEXION MONGODB ──────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connecté avec succès"))
@@ -39,8 +42,8 @@ const orderSchema = new mongoose.Schema(
     orderNumber: { type: String, unique: true },
     paymentStatus: {
       type: String,
-      enum: ["pending", "succeeded", "failed", "refunded"],
-      default: "succeeded",
+      enum: ["pending", "paid", "failed", "refunded"], // valeurs officielles Stripe 2025
+      default: "paid",
     },
     amountTotal: { type: Number, required: true },
     currency: { type: String, default: "eur" },
@@ -56,7 +59,7 @@ const orderSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Numéro de commande : CMD-2025-00001
+// Génération auto du numéro de commande : CMD-2025-00001
 orderSchema.pre("save", async function (next) {
   if (!this.orderNumber && this.isNew) {
     const year = new Date().getFullYear();
@@ -82,15 +85,19 @@ app.post("/api/create-checkout-session", async (req, res) => {
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity }],
       mode: "payment",
-      success_url: `${process.env.FRONTEND_URL || "https://modal-payment.vercel.app"}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL || "https://modal-payment.vercel.app"}/cancel`,
+      success_url: `${
+        process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
+      }/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${
+        process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
+      }/cancel`,
       customer_email: customerEmail || undefined,
       metadata,
     });
 
     res.json({ url: session.url });
   } catch (error) {
-    console.error("Erreur création session :", error);
+    console.error("Erreur création session :", error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -110,7 +117,7 @@ app.get("/api/retrieve-session", async (req, res) => {
       amount_total: order.amountTotal,
       currency: order.currency,
       customer_details: {
-        name: order.customer.name,
+        name: order.customer.name || "Anonyme",
         email: order.customer.email,
         phone: order.customer.phone,
       },
@@ -119,7 +126,7 @@ app.get("/api/retrieve-session", async (req, res) => {
       event: order.event || null,
     });
   } catch (error) {
-    console.error("Erreur retrieve-session :", error);
+    console.error("Erreur retrieve-session :", error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -129,45 +136,58 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
   const sig = req.headers["stripe-signature"];
 
   try {
-    const event = stripe.webhooks.constructEvent(req.rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    const event = stripe.webhooks.constructEvent(
+      req.body, // raw body
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
 
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
+      // Éviter les doublons
       const exists = await Order.findOne({ stripeSessionId: session.id });
-      if (exists) return res.json({ received: true });
+      if (exists) {
+        console.log("Commande déjà existante :", session.id);
+        return res.json({ received: true });
+      }
 
       const metadata = session.metadata || {};
       const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
       const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
 
+      // Normalisation du payment_status (Stripe renvoie "paid" maintenant)
+      const paymentStatus = session.payment_status === "succeeded" ? "paid" : session.payment_status;
+
       await new Order({
         stripeSessionId: session.id,
         amountTotal: session.amount_total,
-        currency: session.currency,
-        paymentStatus: session.payment_status,
+        currency: session.currency || "eur",
+        paymentStatus, // ← ici c'est bon à 100%
         customer: {
           name: metadata.nom || session.customer_details?.name || "Anonyme",
-          email: metadata.email || session.customer_details?.email,
+          email: metadata.email || session.customer_details?.email || null,
           phone: metadata.telephone || session.customer_details?.phone || null,
         },
         type: metadata.type,
         metadata,
-        event: singleEvent ? {
-          title: singleEvent.title,
-          place: singleEvent.place,
-          date: singleEvent.date,
-          hours: singleEvent.hours,
-        } : null,
+        event: singleEvent
+          ? {
+              title: singleEvent.title,
+              place: singleEvent.place,
+              date: singleEvent.date,
+              hours: singleEvent.hours,
+            }
+          : null,
       }).save();
 
-      console.log(`Commande créée → ${session.id}`);
+      console.log(`Commande créée avec succès → ${session.id} | Status: ${paymentStatus}`);
     }
 
     res.json({ received: true });
   } catch (err) {
     console.error("Webhook error:", err.message);
-    res.status(400).send(`Webhook Error: ${err.message}`);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 });
 
