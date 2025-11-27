@@ -21,9 +21,11 @@ app.use(
 );
 
 // ────────────────── BODY PARSING ──────────────────
-// Important : webhook DOIT être avant express.json()
-app.use(express.raw({ type: "application/json" })); // pour le webhook uniquement
-app.use(express.json()); // pour toutes les autres routes
+// CRUCIAL : raw body UNIQUEMENT pour la route /webhook
+app.use("/webhook", express.raw({ type: "application/json" }));
+
+// Toutes les autres routes (dont /create-checkout-session) → JSON normal
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ────────────────── CONNEXION MONGODB ──────────────────
@@ -42,7 +44,7 @@ const orderSchema = new mongoose.Schema(
     orderNumber: { type: String, unique: true },
     paymentStatus: {
       type: String,
-      enum: ["pending", "paid", "failed", "refunded"], // valeurs officielles Stripe 2025
+      enum: ["pending", "paid", "failed", "refunded"],
       default: "paid",
     },
     amountTotal: { type: Number, required: true },
@@ -80,6 +82,11 @@ app.get("/", (req, res) => res.send("Backend Stripe + MongoDB OK"));
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
+
+    // Sécurité supplémentaire (au cas où)
+    if (!priceId) {
+      return res.status(400).json({ error: "priceId manquant" });
+    }
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -137,7 +144,7 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
 
   try {
     const event = stripe.webhooks.constructEvent(
-      req.body, // raw body
+      req.body,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
@@ -145,7 +152,6 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      // Éviter les doublons
       const exists = await Order.findOne({ stripeSessionId: session.id });
       if (exists) {
         console.log("Commande déjà existante :", session.id);
@@ -156,14 +162,13 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
       const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
       const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
 
-      // Normalisation du payment_status (Stripe renvoie "paid" maintenant)
       const paymentStatus = session.payment_status === "succeeded" ? "paid" : session.payment_status;
 
       await new Order({
         stripeSessionId: session.id,
         amountTotal: session.amount_total,
         currency: session.currency || "eur",
-        paymentStatus, // ← ici c'est bon à 100%
+        paymentStatus,
         customer: {
           name: metadata.nom || session.customer_details?.name || "Anonyme",
           email: metadata.email || session.customer_details?.email || null,
@@ -181,7 +186,7 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
           : null,
       }).save();
 
-      console.log(`Commande créée avec succès → ${session.id} | Status: ${paymentStatus}`);
+      console.log(`Commande créée → ${session.id} | Status: ${paymentStatus}`);
     }
 
     res.json({ received: true });
