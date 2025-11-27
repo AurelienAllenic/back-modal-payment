@@ -41,13 +41,22 @@ const orderSchema = new mongoose.Schema({
   event: { title: String, place: String, date: String, hours: String },
 }, { timestamps: true });
 
+// Génération du numéro de commande — VERSION QUI MARCHE À 100 %
 orderSchema.pre("save", async function (next) {
-  if (!this.orderNumber && this.isNew) {
-    const year = new Date().getFullYear();
-    const count = await this.constructor.countDocuments({ createdAt: { $gte: new Date(`${year}-01-01`) } });
-    this.orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
+  if (this.isNew && !this.orderNumber) {
+    try {
+      const year = new Date().getFullYear();
+      const count = await this.constructor.countDocuments({
+        createdAt: { $gte: new Date(`${year}-01-01`) }
+      });
+      this.orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
+      next();
+    } catch (err) {
+      next(err);
+    }
+  } else {
+    next();
   }
-  next();
 });
 
 const Order = mongoose.model("Order", orderSchema);
