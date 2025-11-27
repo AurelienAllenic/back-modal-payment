@@ -150,24 +150,22 @@ app.post("/webhook", (req, res) => {
 
           await new Order({
             stripeSessionId: session.id,
-            amountTotal: session.amount_total,
-            currency: session.currency || "eur",
-            paymentStatus: session.payment_status === "succeeded" ? "paid" : session.payment_status,
+            amountTotal: session.amount_total ?? 0,
+            currency: session.currency ?? "eur",
+            paymentStatus: "paid",
             customer: {
               name: metadata.nom || session.customer_details?.name || "Anonyme",
               email: metadata.email || session.customer_details?.email || null,
               phone: metadata.telephone || session.customer_details?.phone || null,
             },
-            type: metadata.type,
+            type: metadata.type || "unknown",
             metadata,
-            event: singleEvent
-              ? {
-                  title: singleEvent.title,
-                  place: singleEvent.place,
-                  date: singleEvent.date,
-                  hours: singleEvent.hours,
-                }
-              : null,
+            event: singleEvent ? {
+              title: singleEvent.title,
+              place: singleEvent.place,
+              date: singleEvent.date,
+              hours: singleEvent.hours,
+            } : null,
           }).save();
 
           console.log(`Commande créée → ${session.id}`);
