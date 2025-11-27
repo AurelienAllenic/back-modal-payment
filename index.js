@@ -1,40 +1,79 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const mongoose = require("mongoose");
 const Stripe = require("stripe");
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
 // ────────────────── CORS ──────────────────
-const corsOptions = {
+app.use(cors({
   origin: [
     "http://localhost:5173",
-    "http://127.0.0.1:5173",
     "http://localhost:5174",
     "https://modal-payment.vercel.app",
-    // Accepte TOUS les sous-domaines vercel.app (preview + prod + branches)
-    /.+\.vercel\.app$/,
+    /\.vercel\.app$/,
   ],
   credentials: true,
-  optionsSuccessStatus: 200,
-};
+}));
 
-// Middleware créé une seule fois → gère le preflight automatiquement
-const corsMiddleware = cors(corsOptions);
+// ────────────────── BODY PARSING ──────────────────
+// Important : webhook DOIT être avant express.json()
+app.use(express.json({ verify: (req, res, buf) => (req.rawBody = buf) })); // pour le webhook
+app.use(express.urlencoded({ extended: true }));
 
-app.use(corsMiddleware);
-// SUPPRIME CETTE LIGNE QUI CAUSE LE CRASH : app.options("*", corsMiddleware);
+// ────────────────── CONNEXION MONGODB (version 2025) ──────────────────
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connecté avec succès"))
+  .catch((err) => {
+    console.error("Erreur connexion MongoDB :", err.message);
+    process.exit(1);
+  });
 
-// ────────────────── BODY ──────────────────
-app.use(express.json());
+// ────────────────── MODÈLE ORDER ──────────────────
+const orderSchema = new mongoose.Schema(
+  {
+    stripeSessionId: { type: String, required: true, unique: true },
+    orderNumber: { type: String, unique: true },
+    paymentStatus: {
+      type: String,
+      enum: ["pending", "succeeded", "failed", "refunded"],
+      default: "succeeded",
+    },
+    amountTotal: { type: Number, required: true },
+    currency: { type: String, default: "eur" },
+    customer: {
+      name: String,
+      email: { type: String, lowercase: true },
+      phone: String,
+    },
+    type: { type: String, enum: ["traineeship", "show", "courses"], required: true },
+    metadata: mongoose.Schema.Types.Mixed,
+    event: { title: String, place: String, date: String, hours: String },
+  },
+  { timestamps: true }
+);
 
-// ────────────────── ROUTES ──────────────────
-app.get("/", (req, res) => {
-  res.send("Backend Stripe Vercel OK");
+// Numéro de commande : CMD-2025-00001
+orderSchema.pre("save", async function (next) {
+  if (!this.orderNumber && this.isNew) {
+    const year = new Date().getFullYear();
+    const count = await this.constructor.countDocuments({
+      createdAt: { $gte: new Date(`${year}-01-01`) },
+    });
+    this.orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
+  }
+  next();
 });
 
-// CREATE CHECKOUT SESSION
+const Order = mongoose.model("Order", orderSchema);
+
+// ────────────────── ROUTES ──────────────────
+app.get("/", (req, res) => res.send("Backend Stripe + MongoDB OK"));
+
+// Créer une session Checkout
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
@@ -43,40 +82,97 @@ app.post("/api/create-checkout-session", async (req, res) => {
       payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity }],
       mode: "payment",
-      success_url: `https://modal-payment.vercel.app/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${req.headers.origin || "https://modal-payment.vercel.app"}/cancel`,
+      success_url: `${process.env.FRONTEND_URL || "https://modal-payment.vercel.app"}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL || "https://modal-payment.vercel.app"}/cancel`,
       customer_email: customerEmail || undefined,
       metadata,
     });
 
     res.json({ url: session.url });
   } catch (error) {
-    console.error("Erreur création session Stripe :", error);
+    console.error("Erreur création session :", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// RETRIEVE SESSION
+// Récupérer la commande (page success)
 app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
     if (!session_id) return res.status(400).json({ error: "session_id manquant" });
 
-    const session = await stripe.checkout.sessions.retrieve(session_id, {
-      expand: ["line_items", "customer_details"],
-    });
+    const order = await Order.findOne({ stripeSessionId: session_id });
+    if (!order) return res.status(404).json({ error: "Commande non trouvée" });
 
-    res.json(session);
+    res.json({
+      id: order.stripeSessionId,
+      orderNumber: order.orderNumber,
+      amount_total: order.amountTotal,
+      currency: order.currency,
+      customer_details: {
+        name: order.customer.name,
+        email: order.customer.email,
+        phone: order.customer.phone,
+      },
+      metadata: order.metadata || {},
+      type: order.type,
+      event: order.event || null,
+    });
   } catch (error) {
-    console.error("Erreur récupération session :", error);
+    console.error("Erreur retrieve-session :", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ────────────────── LOCAL + VERCEL ──────────────────
-const PORT = process.env.PORT || 4242;
-app.listen(PORT, () => console.log(`Local: http://localhost:${PORT}`));
+// Webhook Stripe → crée la commande en BDD
+app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
 
-// LIGNES MAGIQUES OBLIGATOIRES
+  try {
+    const event = stripe.webhooks.constructEvent(req.rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET);
+
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+
+      const exists = await Order.findOne({ stripeSessionId: session.id });
+      if (exists) return res.json({ received: true });
+
+      const metadata = session.metadata || {};
+      const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
+      const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
+
+      await new Order({
+        stripeSessionId: session.id,
+        amountTotal: session.amount_total,
+        currency: session.currency,
+        paymentStatus: session.payment_status,
+        customer: {
+          name: metadata.nom || session.customer_details?.name || "Anonyme",
+          email: metadata.email || session.customer_details?.email,
+          phone: metadata.telephone || session.customer_details?.phone || null,
+        },
+        type: metadata.type,
+        metadata,
+        event: singleEvent ? {
+          title: singleEvent.title,
+          place: singleEvent.place,
+          date: singleEvent.date,
+          hours: singleEvent.hours,
+        } : null,
+      }).save();
+
+      console.log(`Commande créée → ${session.id}`);
+    }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+    res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+});
+
+// ────────────────── LANCEMENT ──────────────────
+const PORT = process.env.PORT || 4242;
+app.listen(PORT, () => console.log(`Serveur prêt sur le port ${PORT}`));
+
 module.exports = app;
-module.exports.handler = app; // au cas où
