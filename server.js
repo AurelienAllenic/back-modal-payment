@@ -147,7 +147,7 @@ app.post("/webhook", async (req, res) => {          // ← async ici
             email: metadata.email || session.customer_details?.email || null,
             phone: metadata.telephone || session.customer_details?.phone || null,
           },
-          type: metadata.type || "unknown",
+          type: metadata.type,
           metadata,
           event: singleEvent ? {
             title: singleEvent.title,
