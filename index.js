@@ -21,10 +21,7 @@ app.use(
 );
 
 // ────────────────── BODY PARSING ──────────────────
-// CRUCIAL : raw body UNIQUEMENT pour la route /webhook
-app.use("/webhook", express.raw({ type: "application/json" }));
-
-// Toutes les autres routes (dont /create-checkout-session) → JSON normal
+// UNIQUEMENT pour les routes normales → JSON
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -61,7 +58,6 @@ const orderSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Génération auto du numéro de commande : CMD-2025-00001
 orderSchema.pre("save", async function (next) {
   if (!this.orderNumber && this.isNew) {
     const year = new Date().getFullYear();
@@ -78,12 +74,11 @@ const Order = mongoose.model("Order", orderSchema);
 // ────────────────── ROUTES ──────────────────
 app.get("/", (req, res) => res.send("Backend Stripe + MongoDB OK"));
 
-// Créer une session Checkout
+// Créer session
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
 
-    // Sécurité supplémentaire (au cas où)
     if (!priceId) {
       return res.status(400).json({ error: "priceId manquant" });
     }
@@ -109,7 +104,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
   }
 });
 
-// Récupérer la commande (page success)
+// Récupérer commande
 app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
@@ -138,63 +133,64 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
-// Webhook Stripe → crée la commande en BDD
-app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
+// WEBHOOK — C’EST LA SEULE ROUTE QUI DOIT ÊTRE EN RAW
+app.post(
+  "/webhook",
+  express.raw({ type: "application/json" }), // ← uniquement ici
+  async (req, res) => {
+    const sig = req.headers["stripe-signature"];
 
-  try {
-    const event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    try {
+      const event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
 
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
+      if (event.type === "checkout.session.completed") {
+        const session = event.data.object;
 
-      const exists = await Order.findOne({ stripeSessionId: session.id });
-      if (exists) {
-        console.log("Commande déjà existante :", session.id);
-        return res.json({ received: true });
+        const exists = await Order.findOne({ stripeSessionId: session.id });
+        if (exists) {
+          return res.json({ received: true });
+        }
+
+        const metadata = session.metadata || {};
+        const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
+        const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
+
+        await new Order({
+          stripeSessionId: session.id,
+          amountTotal: session.amount_total,
+          currency: session.currency || "eur",
+          paymentStatus: session.payment_status === "succeeded" ? "paid" : session.payment_status,
+          customer: {
+            name: metadata.nom || session.customer_details?.name || "Anonyme",
+            email: metadata.email || session.customer_details?.email || null,
+            phone: metadata.telephone || session.customer_details?.phone || null,
+          },
+          type: metadata.type,
+          metadata,
+          event: singleEvent
+            ? {
+                title: singleEvent.title,
+                place: singleEvent.place,
+                date: singleEvent.date,
+                hours: singleEvent.hours,
+              }
+            : null,
+        }).save();
+
+        console.log(`Commande créée → ${session.id}`);
       }
 
-      const metadata = session.metadata || {};
-      const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
-      const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
-
-      const paymentStatus = session.payment_status === "succeeded" ? "paid" : session.payment_status;
-
-      await new Order({
-        stripeSessionId: session.id,
-        amountTotal: session.amount_total,
-        currency: session.currency || "eur",
-        paymentStatus,
-        customer: {
-          name: metadata.nom || session.customer_details?.name || "Anonyme",
-          email: metadata.email || session.customer_details?.email || null,
-          phone: metadata.telephone || session.customer_details?.phone || null,
-        },
-        type: metadata.type,
-        metadata,
-        event: singleEvent
-          ? {
-              title: singleEvent.title,
-              place: singleEvent.place,
-              date: singleEvent.date,
-              hours: singleEvent.hours,
-            }
-          : null,
-      }).save();
-
-      console.log(`Commande créée → ${session.id} | Status: ${paymentStatus}`);
+      res.json({ received: true });
+    } catch (err) {
+      console.error("Webhook error:", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
     }
-
-    res.json({ received: true });
-  } catch (err) {
-    console.error("Webhook error:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-});
+);
 
 // ────────────────── LANCEMENT ──────────────────
 const PORT = process.env.PORT || 4242;
