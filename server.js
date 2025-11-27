@@ -8,66 +8,46 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
 // ────────────────── CORS ──────────────────
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "http://localhost:5174",
-      "https://modal-payment.vercel.app",
-      /\.vercel\.app$/,
-    ],
-    credentials: true,
-  })
-);
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://modal-payment.vercel.app",
+    /\.vercel\.app$/,
+  ],
+  credentials: true,
+}));
 
 // ────────────────── BODY PARSING ──────────────────
-app.use("/webhook", express.raw({ type: "application/json" })); // webhook en raw
-app.use(express.json()); // tout le reste en JSON
+app.use("/webhook", express.raw({ type: "application/json" }));
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ────────────────── CONNEXION MONGODB ──────────────────
-mongoose
-  .connect(process.env.MONGO_URI)
+// ────────────────── MONGODB ──────────────────
+mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connecté"))
-  .catch((err) => {
-    console.error("Erreur MongoDB :", err.message);
-    process.exit(1);
-  });
+  .catch(err => { console.error("MongoDB erreur:", err); process.exit(1); });
 
-// ────────────────── MODÈLE ORDER ──────────────────
-const orderSchema = new mongoose.Schema(
-  {
-    stripeSessionId: { type: String, required: true, unique: true },
-    orderNumber: { type: String, unique: true },
-    paymentStatus: {
-      type: String,
-      enum: ["pending", "paid", "failed", "refunded"],
-      default: "paid",
-    },
-    amountTotal: { type: Number, required: true },
-    currency: { type: String, default: "eur" },
-    customer: {
-      name: String,
-      email: { type: String, lowercase: true },
-      phone: String,
-    },
-    type: { type: String, enum: ["traineeship", "show", "courses"], required: true },
-    metadata: mongoose.Schema.Types.Mixed,
-    event: { title: String, place: String, date: String, hours: String },
-  },
-  { timestamps: true }
-);
+// ────────────────── SCHEMA ORDER ──────────────────
+const orderSchema = new mongoose.Schema({
+  stripeSessionId: { type: String, required: true, unique: true },
+  orderNumber: { type: String, unique: true },
+  paymentStatus: { type: String, enum: ["pending", "paid", "failed", "refunded"], default: "paid" },
+  amountTotal: { type: Number, required: true },
+  currency: { type: String, default: "eur" },
+  customer: { name: String, email: { type: String, lowercase: true }, phone: String },
+  type: { type: String, enum: ["traineeship", "show", "courses"], required: true },
+  metadata: mongoose.Schema.Types.Mixed,
+  event: { title: String, place: String, date: String, hours: String },
+}, { timestamps: true });
 
-// Génération du numéro de commande → CORRIGÉ (next bien passé)
 orderSchema.pre("save", async function (next) {
   if (!this.orderNumber && this.isNew) {
     const year = new Date().getFullYear();
-    const count = await this.constructor.countDocuments({
-      createdAt: { $gte: new Date(`${year}-01-01`) },
-    });
+    const count = await this.constructor.countDocuments({ createdAt: { $gte: new Date(`${year}-01-01`) } });
     this.orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
   }
-  next(); // OBLIGATOIRE
+  next();
 });
 
 const Order = mongoose.model("Order", orderSchema);
@@ -92,7 +72,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
 
     res.json({ url: session.url });
   } catch (error) {
-    console.error("Erreur création session :", error.message);
+    console.error("Erreur création session:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -120,59 +100,58 @@ app.get("/api/retrieve-session", async (req, res) => {
       event: order.event || null,
     });
   } catch (error) {
-    console.error("Erreur retrieve-session :", error.message);
+    console.error("Erreur retrieve-session:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ────────────────── WEBHOOK ──────────────────
-app.post("/webhook", (req, res) => {
+// ────────────────── WEBHOOK (LA SEULE LIGNE QUI MANQUAIT : async) ──────────────────
+app.post("/webhook", async (req, res) => {          // ← async ici
   const sig = req.headers["stripe-signature"];
 
   try {
-    const event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
 
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      (async () => {
-        try {
-          const exists = await Order.findOne({ stripeSessionId: session.id });
-          if (exists) return;
+      console.log("Webhook reçu →", session.id, "payment_status:", session.payment_status);
 
-          const metadata = session.metadata || {};
-          const eventData = metadata.eventData ? JSON.parse(metadata.eventData) : null;
-          const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
-
-          await new Order({
-            stripeSessionId: session.id,
-            amountTotal: session.amount_total ?? 0,
-            currency: session.currency ?? "eur",
-            paymentStatus: "paid",
-            customer: {
-              name: metadata.nom || session.customer_details?.name || "Anonyme",
-              email: metadata.email || session.customer_details?.email || null,
-              phone: metadata.telephone || session.customer_details?.phone || null,
-            },
-            type: metadata.type || "unknown",
-            metadata,
-            event: singleEvent ? {
-              title: singleEvent.title,
-              place: singleEvent.place,
-              date: singleEvent.date,
-              hours: singleEvent.hours,
-            } : null,
-          }).save();
-
-          console.log(`Commande créée → ${session.id}`);
-        } catch (err) {
-          console.error("Erreur lors de la sauvegarde de la commande :", err);
+      try {
+        const exists = await Order.findOne({ stripeSessionId: session.id });
+        if (exists) {
+          console.log("Déjà en base →", session.id);
+          return res.json({ received: true });
         }
-      })();
+
+        const metadata = session.metadata || {};
+        const eventData = metadata.eventData ? JSON.parse(metadata.eventData || "null") : null;
+        const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
+
+        await new Order({
+          stripeSessionId: session.id,
+          amountTotal: session.amount_total || 0,
+          currency: session.currency || "eur",
+          paymentStatus: "paid",
+          customer: {
+            name: metadata.nom || session.customer_details?.name || "Anonyme",
+            email: metadata.email || session.customer_details?.email || null,
+            phone: metadata.telephone || session.customer_details?.phone || null,
+          },
+          type: metadata.type || "unknown",
+          metadata,
+          event: singleEvent ? {
+            title: singleEvent.title,
+            place: singleEvent.place,
+            date: singleEvent.date,
+            hours: singleEvent.hours,
+          } : null,
+        }).save();
+
+        console.log("COMMANDE CRÉÉE EN BASE →", session.id);
+      } catch (err) {
+        console.error("ERREUR SAVE COMMANDE:", err.message);
+      }
     }
 
     res.json({ received: true });
