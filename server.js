@@ -307,7 +307,7 @@ app.post("/webhook", async (req, res) => {
       // EMAIL CLIENT
       if (clientEmail && clientEmail.trim() !== "") {
         await resend.emails.send({
-          from: "Modal Danse <notifications@resend.dev>",
+          from: "Modal Danse <hello@resend.dev>",
           to: clientEmail.trim(),
           subject: `Confirmation – ${order.orderNumber}`,
           html: emailHtml,
@@ -318,7 +318,7 @@ app.post("/webhook", async (req, res) => {
       // EMAIL ADMIN
       if (process.env.ADMIN_EMAIL && process.env.ADMIN_EMAIL.trim() !== "") {
         await resend.emails.send({
-          from: "Modal Danse <notifications@resend.dev>",
+          from: "Modal Danse <hello@resend.dev>",
           to: process.env.ADMIN_EMAIL,
           subject: `Nouvelle commande – ${order.orderNumber}`,
           html: `
