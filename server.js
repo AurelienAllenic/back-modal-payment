@@ -307,7 +307,7 @@ app.post("/webhook", async (req, res) => {
       // Email client
       if (order.customer.email) {
         await resend.emails.send({
-          from: "Réservations <no-reply@tondomaine.com>", // À changer après vérification du domaine sur Resend
+          from: "Modal Danse <onboarding@resend.dev>", // À changer après vérification du domaine sur Resend
           to: order.customer.email,
           subject: `Confirmation – ${order.orderNumber}`,
           html: emailHtml,
@@ -316,7 +316,7 @@ app.post("/webhook", async (req, res) => {
 
       // Email admin (toi)
       await resend.emails.send({
-        from: "Réservations <no-reply@tondomaine.com>",
+        from: "Modal Danse <onboarding@resend.dev>",
         to: process.env.ADMIN_EMAIL,
         subject: `Nouvelle commande – ${order.orderNumber}`,
         html: `
