@@ -3,10 +3,10 @@ const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const Stripe = require("stripe");
-const { Resend } = require("resend"); // ← Ajout Resend
+const { Resend } = require("resend");
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-const resend = new Resend(process.env.RESEND_API_KEY); // ← Clé API Resend
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
 
@@ -67,7 +67,7 @@ const orderSchema = new mongoose.Schema(
 
 const Order = mongoose.model("Order", orderSchema);
 
-// ────────────────── FONCTION POUR GÉNÉRER LE CONTENU EMAIL ──────────────────
+// ────────────────── FONCTION CONTENU EMAIL ──────────────────
 const getOrderDetailsHtml = (order) => {
   const m = order.metadata || {};
   const e = order.event || {};
@@ -156,7 +156,7 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
-app.get("/api/orders", async ( copie, res) => {
+app.get("/api/orders", async (req, res) => {
   try {
     const orders = await Order.find({})
       .sort({ createdAt: -1 })
@@ -211,14 +211,8 @@ app.post("/webhook", async (req, res) => {
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
 
-    console.log(
-      "Webhook reçu →",
-      session.id,
-      "| payment_status:",
-      session.payment_status
-    );
+    console.log("Webhook reçu →", session.id, "| payment_status:", session.payment_status);
 
-    // Vérifier si déjà traitée
     const exists = await Order.findOne({ stripeSessionId: session.id });
     if (exists) {
       console.log("Commande déjà existante →", session.id);
@@ -226,19 +220,15 @@ app.post("/webhook", async (req, res) => {
     }
 
     const metadata = session.metadata || {};
-    const eventData = metadata.eventData
-      ? JSON.parse(metadata.eventData || "null")
-      : null;
+    const eventData = metadata.eventData ? JSON.parse(metadata.eventData || "null") : null;
     const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
 
-    // Génération du numéro de commande (100 % fiable sur Vercel)
     const year = new Date().getFullYear();
     const count = await Order.countDocuments({
       createdAt: { $gte: new Date(`${year}-01-01`) },
     });
     const orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
 
-    // Création de la commande
     const order = await new Order({
       stripeSessionId: session.id,
       orderNumber,
@@ -246,12 +236,9 @@ app.post("/webhook", async (req, res) => {
       currency: session.currency || "eur",
       paymentStatus: "paid",
       customer: {
-        name:
-          metadata.nom || session.customer_details?.name || "Anonyme",
-        email:
-          metadata.email || session.customer_details?.email || null,
-        phone:
-          metadata.telephone || session.customer_details?.phone || null,
+        name: metadata.nom || session.customer_details?.name || "Anonyme",
+        email: metadata.email || session.customer_details?.email || null,
+        phone: metadata.telephone || session.customer_details?.phone || null,
       },
       type: metadata.type,
       metadata,
@@ -265,14 +252,9 @@ app.post("/webhook", async (req, res) => {
         : null,
     }).save();
 
-    console.log(
-      "COMMANDE CRÉÉE →",
-      session.id,
-      "| Numéro:",
-      orderNumber
-    );
+    console.log("COMMANDE CRÉÉE →", session.id, "| Numéro:", orderNumber);
 
-    // ────────────────── ENVOI DES EMAILS (Resend) ──────────────────
+    // ────────────────── ENVOI DES EMAILS – VERSION 100% FIABLE ──────────────────
     const confirmationUrl = `${
       process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
     }/success?session_id=${session.id}`;
@@ -304,37 +286,46 @@ app.post("/webhook", async (req, res) => {
     `;
 
     try {
-      // Email client
-      if (order.customer.email) {
+      // Récupération fiable de l’email client (BDD + Stripe session)
+      const clientEmail = order.customer.email || session.customer_details?.email || null;
+
+      // EMAIL CLIENT
+      if (clientEmail && clientEmail.trim() !== "") {
         await resend.emails.send({
-          from: "Modal Danse <onboarding@resend.dev>", // À changer après vérification du domaine sur Resend
-          to: order.customer.email,
+          from: "Modal Danse <notifications@resend.dev>",
+          to: clientEmail,
           subject: `Confirmation – ${order.orderNumber}`,
           html: emailHtml,
         });
+        console.log("EMAIL CLIENT ENVOYÉ →", clientEmail);
+      } else {
+        console.log("AUCUN EMAIL CLIENT VALIDE TROUVÉ");
       }
 
-      // Email admin (toi)
-      await resend.emails.send({
-        from: "Modal Danse <onboarding@resend.dev>",
-        to: process.env.ADMIN_EMAIL,
-        subject: `Nouvelle commande – ${order.orderNumber}`,
-        html: `
-          <h2>Nouvelle réservation !</h2>
-          <p><strong>Numéro :</strong> ${order.orderNumber}</p>
-          <p><strong>Client :</strong> ${order.customer.name} – ${order.customer.email}</p>
-          <p><strong>Téléphone :</strong> ${order.customer.phone || "-"}</p>
-          <p><strong>Montant :</strong> ${amountFormatted} €</p>
-          <p><strong>Type :</strong> ${order.type}</p>
-          ${getOrderDetailsHtml(order)}
-          <p><a href="${confirmationUrl}">Voir la réservation</a></p>
-        `,
-      });
+      // EMAIL ADMIN
+      if (process.env.ADMIN_EMAIL && process.env.ADMIN_EMAIL.trim() !== "") {
+        await resend.emails.send({
+          from: "Modal Danse <notifications@resend.dev>",
+          to: process.env.ADMIN_EMAIL,
+          subject: `Nouvelle commande – ${order.orderNumber}`,
+          html: `
+            <h2>Nouvelle réservation !</h2>
+            <p><strong>Numéro :</strong> ${order.orderNumber}</p>
+            <p><strong>Client :</strong> ${order.customer.name} – ${clientEmail || "non renseigné"}</p>
+            <p><strong>Téléphone :</strong> ${order.customer.phone || "-"}</p>
+            <p><strong>Montant :</strong> ${amountFormatted} €</p>
+            <p><strong>Type :</strong> ${order.type}</p>
+            ${getOrderDetailsHtml(order)}
+            <p><a href="${confirmationUrl}">Voir la réservation</a></p>
+          `,
+        });
+        console.log("EMAIL ADMIN ENVOYÉ →", process.env.ADMIN_EMAIL);
+      }
 
-      console.log("Emails envoyés avec succès (client + admin)");
+      console.log("Tous les emails envoyés avec succès");
     } catch (emailErr) {
-      console.error("Erreur envoi email Resend :", emailErr);
-      // On ne bloque pas le webhook si l'email échoue
+      console.error("ERREUR ENVOI EMAIL :", emailErr.message);
+      if (emailErr.statusCode) console.error("Code:", emailErr.statusCode);
     }
   }
 
