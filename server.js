@@ -254,7 +254,25 @@ app.post("/webhook", async (req, res) => {
 
     console.log("COMMANDE CRÉÉE →", session.id, "| Numéro:", orderNumber);
 
-    // ────────────────── ENVOI DES EMAILS – VERSION 100% FIABLE ──────────────────
+    // ────────────────── DEBUG ULTIME EMAIL CLIENT ──────────────────
+    console.log("=====================================");
+    console.log("DEBUG EMAIL CLIENT");
+    console.log("order.customer.email (dans la BDD) :", order.customer.email);
+    console.log("session.customer_details?.email :", session.customer_details?.email);
+    console.log("metadata.email :", metadata.email);
+    console.log("session.customer_details complet :", JSON.stringify(session.customer_details));
+    console.log("=====================================");
+
+    // Récupération finale de l’email client (3 sources possibles)
+    const clientEmail = order.customer.email || session.customer_details?.email || metadata.email || null;
+
+    if (!clientEmail) {
+      console.log("AUCUN EMAIL CLIENT TROUVÉ – envoi impossible");
+    } else {
+      console.log("EMAIL CLIENT FINAL UTILISÉ →", clientEmail);
+    }
+
+    // ────────────────── ENVOI DES EMAILS ──────────────────
     const confirmationUrl = `${
       process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
     }/success?session_id=${session.id}`;
@@ -286,20 +304,15 @@ app.post("/webhook", async (req, res) => {
     `;
 
     try {
-      // Récupération fiable de l’email client (BDD + Stripe session)
-      const clientEmail = order.customer.email || session.customer_details?.email || null;
-
       // EMAIL CLIENT
       if (clientEmail && clientEmail.trim() !== "") {
         await resend.emails.send({
           from: "Modal Danse <notifications@resend.dev>",
-          to: clientEmail,
+          to: clientEmail.trim(),
           subject: `Confirmation – ${order.orderNumber}`,
           html: emailHtml,
         });
-        console.log("EMAIL CLIENT ENVOYÉ →", clientEmail);
-      } else {
-        console.log("AUCUN EMAIL CLIENT VALIDE TROUVÉ");
+        console.log("EMAIL CLIENT ENVOYÉ AVEC SUCCÈS →", clientEmail.trim());
       }
 
       // EMAIL ADMIN
@@ -324,7 +337,7 @@ app.post("/webhook", async (req, res) => {
 
       console.log("Tous les emails envoyés avec succès");
     } catch (emailErr) {
-      console.error("ERREUR ENVOI EMAIL :", emailErr.message);
+      console.error("ERREUR RESEND :", emailErr.message);
       if (emailErr.statusCode) console.error("Code:", emailErr.statusCode);
     }
   }
