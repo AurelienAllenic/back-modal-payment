@@ -102,14 +102,34 @@ const getOrderDetailsHtml = (order) => {
 // ────────────────── ROUTES ──────────────────
 app.get("/", (req, res) => res.send("Backend OK"));
 
+// NOUVELLE VERSION → accepte items[] (tableau) OU l'ancien format priceId + quantity
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
-    const { priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
-    if (!priceId) return res.status(400).json({ error: "priceId manquant" });
+    const { items, priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
+
+    // Compatibilité avec l'ancien format (au cas où)
+    let lineItems = [];
+
+    if (items && Array.isArray(items) && items.length > 0) {
+      // Nouveau format : plusieurs produits possibles (spectacles adulte + enfant)
+      lineItems = items.map((item) => ({
+        price: item.price,
+        quantity: item.quantity,
+      }));
+    } else if (priceId) {
+      // Ancien format : un seul produit
+      lineItems = [{ price: priceId, quantity }];
+    } else {
+      return res.status(400).json({ error: "priceId ou items manquant" });
+    }
+
+    if (lineItems.length === 0) {
+      return res.status(400).json({ error: "Aucun article à payer" });
+    }
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
-      line_items: [{ price: priceId, quantity }],
+      line_items: lineItems,
       mode: "payment",
       success_url: `${
         process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
@@ -128,6 +148,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
   }
 });
 
+// Les autres routes restent IDENTIQUES
 app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
@@ -192,7 +213,7 @@ app.get("/api/orders", async (req, res) => {
   }
 });
 
-// ────────────────── WEBHOOK ──────────────────
+// ────────────────── WEBHOOK (inchangé) ──────────────────
 app.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
 
@@ -254,25 +275,8 @@ app.post("/webhook", async (req, res) => {
 
     console.log("COMMANDE CRÉÉE →", session.id, "| Numéro:", orderNumber);
 
-    // ────────────────── DEBUG ULTIME EMAIL CLIENT ──────────────────
-    console.log("=====================================");
-    console.log("DEBUG EMAIL CLIENT");
-    console.log("order.customer.email (dans la BDD) :", order.customer.email);
-    console.log("session.customer_details?.email :", session.customer_details?.email);
-    console.log("metadata.email :", metadata.email);
-    console.log("session.customer_details complet :", JSON.stringify(session.customer_details));
-    console.log("=====================================");
-
-    // Récupération finale de l’email client (3 sources possibles)
     const clientEmail = order.customer.email || session.customer_details?.email || metadata.email || null;
 
-    if (!clientEmail) {
-      console.log("AUCUN EMAIL CLIENT TROUVÉ – envoi impossible");
-    } else {
-      console.log("EMAIL CLIENT FINAL UTILISÉ →", clientEmail);
-    }
-
-    // ────────────────── ENVOI DES EMAILS ──────────────────
     const confirmationUrl = `${
       process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
     }/success?session_id=${session.id}`;
@@ -285,7 +289,7 @@ app.post("/webhook", async (req, res) => {
         <p>Nous avons bien reçu votre paiement. Voici le récapitulatif de votre réservation :</p>
 
         <div style="background:white; padding:15px; border-radius:8px; margin:20px 0;">
-          <p><strong>Numéro de commande :</strong> ${order.orderNumber}</p>
+          <p><strong>Numéro de commande :</strong> ${orderNumber}</p>
           <p><strong>Montant payé :</strong> ${amountFormatted} €</p>
         </div>
 
@@ -304,7 +308,6 @@ app.post("/webhook", async (req, res) => {
     `;
 
     try {
-      // EMAIL CLIENT
       if (clientEmail && clientEmail.trim() !== "") {
         await resend.emails.send({
           from: "Modal Danse <hello@resend.dev>",
@@ -312,10 +315,9 @@ app.post("/webhook", async (req, res) => {
           subject: `Confirmation – ${order.orderNumber}`,
           html: emailHtml,
         });
-        console.log("EMAIL CLIENT ENVOYÉ AVEC SUCCÈS →", clientEmail.trim());
+        console.log("EMAIL CLIENT ENVOYÉ →", clientEmail.trim());
       }
 
-      // EMAIL ADMIN
       if (process.env.ADMIN_EMAIL && process.env.ADMIN_EMAIL.trim() !== "") {
         await resend.emails.send({
           from: "Modal Danse <hello@resend.dev>",
@@ -332,13 +334,10 @@ app.post("/webhook", async (req, res) => {
             <p><a href="${confirmationUrl}">Voir la réservation</a></p>
           `,
         });
-        console.log("EMAIL ADMIN ENVOYÉ →", process.env.ADMIN_EMAIL);
+        console.log("EMAIL ADMIN ENVOYÉ");
       }
-
-      console.log("Tous les emails envoyés avec succès");
     } catch (emailErr) {
       console.error("ERREUR RESEND :", emailErr.message);
-      if (emailErr.statusCode) console.error("Code:", emailErr.statusCode);
     }
   }
 
