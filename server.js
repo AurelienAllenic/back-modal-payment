@@ -376,6 +376,29 @@ app.post("/webhook", async (req, res) => {
   res.json({ received: true });
 });
 
+
+// Récupérer les places disponibles pour un stage
+app.get("/api/capacity/:eventId", async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const capacity = await EventCapacity.findOne({ eventId });
+
+    if (!capacity) {
+      return res.json({ available: 0, max: 0, isFull: true });
+    }
+
+    const available = capacity.maxPlaces - capacity.bookedPlaces;
+    res.json({
+      available,
+      max: capacity.maxPlaces,
+      isFull: available <= 0,
+    });
+  } catch (error) {
+    console.error("Erreur capacity:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
 // ────────────────── LANCEMENT ──────────────────
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => console.log(`Serveur prêt sur le port ${PORT}`));
