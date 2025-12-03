@@ -4,7 +4,11 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const Stripe = require("stripe");
 const { Resend } = require("resend");
-const EventCapacity = require("./models/EventCapacity");
+const Traineeship = require('./models/Traineeship')
+const Show = require('./models/Show')
+const classicCourse = require('./models/ClassicCourse')
+const trialCourse = require('./models/TrialCourse')
+
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -236,142 +240,38 @@ app.post("/webhook", async (req, res) => {
   }
 
   if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-  
-    console.log("Webhook reçu →", session.id, "| payment_status:", session.payment_status);
-  
-    const exists = await Order.findOne({ stripeSessionId: session.id });
-    if (exists) {
-      console.log("Commande déjà existante →", session.id);
-      return res.json({ received: true });
-    }
-  
-    const metadata = session.metadata || {};
-    const eventData = metadata.eventData ? JSON.parse(metadata.eventData || "null") : null;
-    const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
-  
-    const year = new Date().getFullYear();
-    const count = await Order.countDocuments({
-      createdAt: { $gte: new Date(`${year}-01-01`) },
+  const session = event.data.object;
+  const metadata = session.metadata || {};
+  const type = metadata.type; // "traineeship", "show", "classic", "trial"
+  const quantity = parseInt(metadata.requestedPlaces || "1");
+  const eventId = metadata.eventId; // ton ID de stage, show ou cours
+
+  if (type === "traineeship" && eventId) {
+    await Traineeship.findByIdAndUpdate(eventId, {
+      $inc: { numberOfPlaces: -quantity }
     });
-    const orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
-  
-    const order = await new Order({
-      stripeSessionId: session.id,
-      orderNumber,
-      amountTotal: session.amount_total || 0,
-      currency: session.currency || "eur",
-      paymentStatus: "paid",
-      customer: {
-        name: metadata.nom || session.customer_details?.name || "Anonyme",
-        email: metadata.email || session.customer_details?.email || null,
-        phone: metadata.telephone || session.customer_details?.phone || null,
-      },
-      type: metadata.type,
-      metadata,
-      event: singleEvent
-        ? {
-            title: singleEvent.title || "Événement",
-            place: singleEvent.place || "Lieu inconnu",
-            date: singleEvent.date || "Date inconnue",
-            hours: singleEvent.hours || "Horaire inconnu",
-          }
-        : null,
-    }).save();
-  
-    console.log("COMMANDE CRÉÉE →", session.id, "| Numéro:", orderNumber);
-  
-    if (session.metadata.eventId && session.metadata.requestedPlaces) {
-      const eventId = session.metadata.eventId;
-      const places = parseInt(session.metadata.requestedPlaces);
-  
-      const capacity = await EventCapacity.findOne({ eventId });
-  
-      if (capacity) {
-        const newBooked = capacity.bookedPlaces + places;
-  
-        if (newBooked > capacity.maxPlaces) {
-          console.error("SURBOOKING DÉTECTÉ !", {
-            eventId,
-            requested: places,
-            current: capacity.bookedPlaces,
-            max: capacity.maxPlaces,
-          });
-        } else {
-          await EventCapacity.updateOne(
-            { eventId },
-            { $set: { bookedPlaces: newBooked } }
-          );
-          console.log(`Places réservées : +${places} → ${eventId} (${newBooked}/${capacity.maxPlaces})`);
-        }
-      }
-    }
-  
-    const clientEmail = order.customer.email || session.customer_details?.email || metadata.email || null;
-  
-    const confirmationUrl = `${
-      process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
-    }/success?session_id=${session.id}`;
-    const amountFormatted = (order.amountTotal / 100).toFixed(2);
-  
-    const emailHtml = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 12px; background:#fafafa;">
-        <h2 style="color:#28a745; text-align:center;">Réservation confirmée !</h2>
-        <p>Bonjour ${order.customer.name},</p>
-        <p>Nous avons bien reçu votre paiement. Voici le récapitulatif de votre réservation :</p>
-  
-        <div style="background:white; padding:15px; border-radius:8px; margin:20px 0;">
-          <p><strong>Numéro de commande :</strong> ${orderNumber}</p>
-          <p><strong>Montant payé :</strong> ${amountFormatted} €</p>
-        </div>
-  
-        ${getOrderDetailsHtml(order)}
-  
-        <div style="text-align:center; margin:30px 0;">
-          <a href="${confirmationUrl}" style="background:#28a745; color:white; padding:14px 28px; text-decoration:none; border-radius:8px; font-weight:bold; font-size:16px;">
-            Voir ma réservation
-          </a>
-        </div>
-  
-        <p>À très bientôt !</p>
-        <hr style="border:none; border-top:1px solid #eee; margin:30px 0;">
-        <small style="color:#888;">Ceci est un email automatique – ne pas répondre.</small>
-      </div>
-    `;
-  
-    try {
-      if (clientEmail && clientEmail.trim() !== "") {
-        await resend.emails.send({
-          from: "Modal Danse <hello@resend.dev>",
-          to: clientEmail.trim(),
-          subject: `Confirmation – ${order.orderNumber}`,
-          html: emailHtml,
-        });
-        console.log("EMAIL CLIENT ENVOYÉ →", clientEmail.trim());
-      }
-  
-      if (process.env.ADMIN_EMAIL && process.env.ADMIN_EMAIL.trim() !== "") {
-        await resend.emails.send({
-          from: "Modal Danse <hello@resend.dev>",
-          to: process.env.ADMIN_EMAIL,
-          subject: `Nouvelle commande – ${order.orderNumber}`,
-          html: `
-            <h2>Nouvelle réservation !</h2>
-            <p><strong>Numéro :</strong> ${orderNumber}</p>
-            <p><strong>Client :</strong> ${order.customer.name} – ${clientEmail || "non renseigné"}</p>
-            <p><strong>Téléphone :</strong> ${order.customer.phone || "-"}</p>
-            <p><strong>Montant :</strong> ${amountFormatted} €</p>
-            <p><strong>Type :</strong> ${order.type}</p>
-            ${getOrderDetailsHtml(order)}
-            <p><a href="${confirmationUrl}">Voir la réservation</a></p>
-          `,
-        });
-        console.log("EMAIL ADMIN ENVOYÉ");
-      }
-    } catch (emailErr) {
-      console.error("ERREUR RESEND :", emailErr.message);
-    }
   }
+
+  if (type === "show" && eventId) {
+    await Show.findByIdAndUpdate(eventId, {
+      $inc: { numberOfPlaces: -quantity }
+    });
+  }
+
+  if (type === "classic" && eventId) {
+    await classicCourse.findByIdAndUpdate(eventId, {
+      $inc: { numberOfPlaces: -quantity }
+    });
+  }
+
+  if (type === "trial" && eventId) {
+    await trialCourse.findByIdAndUpdate(eventId, {
+      $inc: { numberOfPlaces: -quantity }
+    });
+  }
+}
+
+
   
   res.json({ received: true });
 });
@@ -439,6 +339,96 @@ app.post("/api/admin/capacity/update", async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
+
+app.get("/api/traineeships", async (req, res) => {
+  try {
+    const stages = await Traineeship.find({}).sort({ date: 1 }).lean();
+    res.json(stages);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// Récupérer un stage par ID
+app.get("/api/traineeships/:id", async (req, res) => {
+  try {
+    const stage = await Traineeship.findOne({ id: req.params.id }).lean();
+    if (!stage) return res.status(404).json({ error: "Stage introuvable" });
+    res.json(stage);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// Récupérer tous les shows
+app.get("/api/shows", async (req, res) => {
+  try {
+    const shows = await Show.find({}).sort({ date: 1 }).lean();
+    res.json(shows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// Récupérer un show par ID
+app.get("/api/shows/:id", async (req, res) => {
+  try {
+    const show = await Show.findOne({ id: req.params.id }).lean();
+    if (!show) return res.status(404).json({ error: "Spectacle introuvable" });
+    res.json(show);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+
+app.get("/api/classic-courses", async (req, res) => {
+  try {
+    const courses = await classicCourse.find({}).sort({ date: 1 }).lean();
+    res.json(courses);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/classic-courses/:id", async (req, res) => {
+  try {
+    const course = await classicCourse.findById(req.params.id).lean();
+    if (!course) return res.status(404).json({ error: "Cours introuvable" });
+    res.json(course);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/trial-courses", async (req, res) => {
+  try {
+    const courses = await trialCourse.find({}).sort({ date: 1 }).lean();
+    res.json(courses);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+app.get("/api/trial-courses/:id", async (req, res) => {
+  try {
+    const course = await trialCourse.findById(req.params.id).lean();
+    if (!course) return res.status(404).json({ error: "Cours d'essai introuvable" });
+    res.json(course);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
 
 // ────────────────── LANCEMENT ──────────────────
 const PORT = process.env.PORT || 4242;
