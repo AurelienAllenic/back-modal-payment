@@ -13,4 +13,3 @@ const traineeshipSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model("Traineeship", traineeshipSchema);
-s
