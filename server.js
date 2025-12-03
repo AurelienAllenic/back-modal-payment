@@ -399,6 +399,43 @@ app.get("/api/capacity/:eventId", async (req, res) => {
   }
 });
 
+// ────────────────── ADMIN : Lister tous les événements avec capacité ──────────────────
+app.get("/api/admin/capacities", async (req, res) => {
+  try {
+    const capacities = await EventCapacity.find({}).sort({ date: 1 });
+    res.json(capacities);
+  } catch (error) {
+    console.error("Erreur liste capacités:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ────────────────── ADMIN : Mettre à jour la capacité d'un événement ──────────────────
+app.post("/api/admin/capacity/update", async (req, res) => {
+  try {
+    const { eventId, maxPlaces } = req.body;
+
+    if (!eventId || maxPlaces === undefined) {
+      return res.status(400).json({ error: "eventId et maxPlaces requis" });
+    }
+
+    const updated = await EventCapacity.findOneAndUpdate(
+      { eventId },
+      { 
+        maxPlaces: parseInt(maxPlaces),
+        // On protège bookedPlaces : on ne peut pas mettre maxPlaces < bookedPlaces
+        $max: { bookedPlaces: 0 } // inutile ici, mais au cas où
+      },
+      { new: true, upsert: true } // crée si n'existe pas
+    );
+
+    res.json({ success: true, data: updated });
+  } catch (error) {
+    console.error("Erreur mise à jour capacité:", error);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
 // ────────────────── LANCEMENT ──────────────────
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => console.log(`Serveur prêt sur le port ${PORT}`));
