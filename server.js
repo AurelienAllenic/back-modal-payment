@@ -421,13 +421,17 @@ app.post("/api/admin/capacity/update", async (req, res) => {
 
     const updated = await EventCapacity.findOneAndUpdate(
       { eventId },
-      { 
-        maxPlaces: parseInt(maxPlaces),
-        // On protège bookedPlaces : on ne peut pas mettre maxPlaces < bookedPlaces
-        $max: { bookedPlaces: 0 } // inutile ici, mais au cas où
+      {
+        $set: {
+          maxPlaces: parseInt(maxPlaces),
+        },
+        $setOnInsert: {
+          bookedPlaces: 0
+        }
       },
-      { new: true, upsert: true } // crée si n'existe pas
+      { new: true, upsert: true }
     );
+    
 
     res.json({ success: true, data: updated });
   } catch (error) {
