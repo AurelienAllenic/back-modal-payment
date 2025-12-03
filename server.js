@@ -4,10 +4,12 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const Stripe = require("stripe");
 const { Resend } = require("resend");
+
+// ────────────────── IMPORTS DES MODÈLES ──────────────────
 const Traineeship = require('./models/Traineeship');
 const Show = require('./models/Show');
-const classicCourse = require('./models/ClassicCourse');
-const trialCourse = require('./models/TrialCourse');
+const ClassicCourse = require('./models/ClassicCourse');
+const TrialCourse = require('./models/TrialCourse');
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -106,18 +108,16 @@ const getOrderDetailsHtml = (order) => {
 // ────────────────── ROUTES ──────────────────
 app.get("/", (req, res) => res.send("Backend OK"));
 
-// Création de la session Stripe
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { items, priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
 
     let lineItems = [];
 
-    // Support nouveau format (items[]) ET ancien format (priceId)
     if (items && Array.isArray(items) && items.length > 0) {
       lineItems = items.map((item) => ({
         price: item.price,
-        quantity: item.quantity || 1,
+        quantity: item.quantity,
       }));
     } else if (priceId) {
       lineItems = [{ price: priceId, quantity }];
@@ -128,9 +128,6 @@ app.post("/api/create-checkout-session", async (req, res) => {
     if (lineItems.length === 0) {
       return res.status(400).json({ error: "Aucun article à payer" });
     }
-
-    // Calcul du nombre de places demandées
-    const requestedPlaces = lineItems.reduce((sum, item) => sum + item.quantity, 0);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -143,10 +140,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
         process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
       }/cancel`,
       customer_email: customerEmail || undefined,
-      metadata: {
-        ...metadata,
-        requestedPlaces: requestedPlaces.toString(),
-      },
+      metadata,
     });
 
     res.json({ url: session.url });
@@ -156,7 +150,6 @@ app.post("/api/create-checkout-session", async (req, res) => {
   }
 });
 
-// Récupérer une session
 app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
@@ -185,7 +178,6 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
-// Liste des commandes
 app.get("/api/orders", async (req, res) => {
   try {
     const orders = await Order.find({})
@@ -222,7 +214,7 @@ app.get("/api/orders", async (req, res) => {
   }
 });
 
-// ────────────────── WEBHOOK STRIPE ──────────────────
+// ────────────────── WEBHOOK ──────────────────
 app.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
 
@@ -243,7 +235,6 @@ app.post("/webhook", async (req, res) => {
 
     console.log("Webhook reçu →", session.id, "| payment_status:", session.payment_status);
 
-    // Vérifier si la commande existe déjà
     const exists = await Order.findOne({ stripeSessionId: session.id });
     if (exists) {
       console.log("Commande déjà existante →", session.id);
@@ -254,14 +245,12 @@ app.post("/webhook", async (req, res) => {
     const eventData = metadata.eventData ? JSON.parse(metadata.eventData || "null") : null;
     const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
 
-    // Génération du numéro de commande
     const year = new Date().getFullYear();
     const count = await Order.countDocuments({
       createdAt: { $gte: new Date(`${year}-01-01`) },
     });
     const orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
 
-    // Création de la commande
     const order = await new Order({
       stripeSessionId: session.id,
       orderNumber,
@@ -285,46 +274,8 @@ app.post("/webhook", async (req, res) => {
         : null,
     }).save();
 
-    console.log("✅ COMMANDE CRÉÉE →", session.id, "| Numéro:", orderNumber);
+    console.log("COMMANDE CRÉÉE →", session.id, "| Numéro:", orderNumber);
 
-    // ────────────────── DÉCRÉMENTER LES PLACES DISPONIBLES ──────────────────
-    const type = metadata.type;
-    const eventId = metadata.eventId;
-    const requestedPlaces = parseInt(metadata.requestedPlaces || "1");
-
-    try {
-      if (type === "traineeship" && eventId) {
-        await Traineeship.findByIdAndUpdate(eventId, {
-          $inc: { numberOfPlaces: -requestedPlaces }
-        });
-        console.log(`✅ Stage ${eventId}: -${requestedPlaces} places`);
-      }
-
-      if (type === "show" && eventId) {
-        await Show.findByIdAndUpdate(eventId, {
-          $inc: { numberOfPlaces: -requestedPlaces }
-        });
-        console.log(`✅ Show ${eventId}: -${requestedPlaces} places`);
-      }
-
-      if (type === "classic" && eventId) {
-        await classicCourse.findByIdAndUpdate(eventId, {
-          $inc: { numberOfPlaces: -requestedPlaces }
-        });
-        console.log(`✅ Cours classique ${eventId}: -${requestedPlaces} places`);
-      }
-
-      if (type === "trial" && eventId) {
-        await trialCourse.findByIdAndUpdate(eventId, {
-          $inc: { numberOfPlaces: -requestedPlaces }
-        });
-        console.log(`✅ Cours d'essai ${eventId}: -${requestedPlaces} places`);
-      }
-    } catch (updateError) {
-      console.error("❌ Erreur mise à jour des places:", updateError.message);
-    }
-
-    // ────────────────── ENVOI DES EMAILS ──────────────────
     const clientEmail = order.customer.email || session.customer_details?.email || metadata.email || null;
 
     const confirmationUrl = `${
@@ -358,7 +309,6 @@ app.post("/webhook", async (req, res) => {
     `;
 
     try {
-      // Email client
       if (clientEmail && clientEmail.trim() !== "") {
         await resend.emails.send({
           from: "Modal Danse <hello@resend.dev>",
@@ -366,10 +316,9 @@ app.post("/webhook", async (req, res) => {
           subject: `Confirmation – ${order.orderNumber}`,
           html: emailHtml,
         });
-        console.log("✅ EMAIL CLIENT ENVOYÉ →", clientEmail.trim());
+        console.log("EMAIL CLIENT ENVOYÉ →", clientEmail.trim());
       }
 
-      // Email admin
       if (process.env.ADMIN_EMAIL && process.env.ADMIN_EMAIL.trim() !== "") {
         await resend.emails.send({
           from: "Modal Danse <hello@resend.dev>",
@@ -386,10 +335,10 @@ app.post("/webhook", async (req, res) => {
             <p><a href="${confirmationUrl}">Voir la réservation</a></p>
           `,
         });
-        console.log("✅ EMAIL ADMIN ENVOYÉ");
+        console.log("EMAIL ADMIN ENVOYÉ");
       }
     } catch (emailErr) {
-      console.error("❌ ERREUR RESEND :", emailErr.message);
+      console.error("ERREUR RESEND :", emailErr.message);
     }
   }
 
@@ -399,21 +348,21 @@ app.post("/webhook", async (req, res) => {
 // ────────────────── ROUTES TRAINEESHIPS ──────────────────
 app.get("/api/traineeships", async (req, res) => {
   try {
-    const stages = await Traineeship.find({}).sort({ date: 1 }).lean();
-    res.json(stages);
+    const traineeships = await Traineeship.find({}).sort({ date: 1 }).lean();
+    res.json(traineeships);
   } catch (err) {
-    console.error(err);
+    console.error("Erreur /api/traineeships:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
 app.get("/api/traineeships/:id", async (req, res) => {
   try {
-    const stage = await Traineeship.findById(req.params.id).lean();
-    if (!stage) return res.status(404).json({ error: "Stage introuvable" });
-    res.json(stage);
+    const traineeship = await Traineeship.findById(req.params.id).lean();
+    if (!traineeship) return res.status(404).json({ error: "Stage introuvable" });
+    res.json(traineeship);
   } catch (err) {
-    console.error(err);
+    console.error("Erreur /api/traineeships/:id:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
@@ -424,7 +373,7 @@ app.get("/api/shows", async (req, res) => {
     const shows = await Show.find({}).sort({ date: 1 }).lean();
     res.json(shows);
   } catch (err) {
-    console.error(err);
+    console.error("Erreur /api/shows:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
@@ -435,7 +384,7 @@ app.get("/api/shows/:id", async (req, res) => {
     if (!show) return res.status(404).json({ error: "Spectacle introuvable" });
     res.json(show);
   } catch (err) {
-    console.error(err);
+    console.error("Erreur /api/shows/:id:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
@@ -443,21 +392,21 @@ app.get("/api/shows/:id", async (req, res) => {
 // ────────────────── ROUTES CLASSIC COURSES ──────────────────
 app.get("/api/classic-courses", async (req, res) => {
   try {
-    const courses = await classicCourse.find({}).sort({ date: 1 }).lean();
+    const courses = await ClassicCourse.find({}).sort({ date: 1 }).lean();
     res.json(courses);
   } catch (err) {
-    console.error(err);
+    console.error("Erreur /api/classic-courses:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
 app.get("/api/classic-courses/:id", async (req, res) => {
   try {
-    const course = await classicCourse.findById(req.params.id).lean();
+    const course = await ClassicCourse.findById(req.params.id).lean();
     if (!course) return res.status(404).json({ error: "Cours introuvable" });
     res.json(course);
   } catch (err) {
-    console.error(err);
+    console.error("Erreur /api/classic-courses/:id:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
@@ -465,21 +414,21 @@ app.get("/api/classic-courses/:id", async (req, res) => {
 // ────────────────── ROUTES TRIAL COURSES ──────────────────
 app.get("/api/trial-courses", async (req, res) => {
   try {
-    const courses = await trialCourse.find({}).sort({ date: 1 }).lean();
+    const courses = await TrialCourse.find({}).sort({ date: 1 }).lean();
     res.json(courses);
   } catch (err) {
-    console.error(err);
+    console.error("Erreur /api/trial-courses:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
 app.get("/api/trial-courses/:id", async (req, res) => {
   try {
-    const course = await trialCourse.findById(req.params.id).lean();
+    const course = await TrialCourse.findById(req.params.id).lean();
     if (!course) return res.status(404).json({ error: "Cours d'essai introuvable" });
     res.json(course);
   } catch (err) {
-    console.error(err);
+    console.error("Erreur /api/trial-courses/:id:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
