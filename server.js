@@ -4,11 +4,10 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const Stripe = require("stripe");
 const { Resend } = require("resend");
-const Traineeship = require('./models/Traineeship')
-const Show = require('./models/Show')
-const classicCourse = require('./models/ClassicCourse')
-const trialCourse = require('./models/TrialCourse')
-
+const Traineeship = require('./models/Traineeship');
+const Show = require('./models/Show');
+const classicCourse = require('./models/ClassicCourse');
+const trialCourse = require('./models/TrialCourse');
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -97,8 +96,8 @@ const getOrderDetailsHtml = (order) => {
   if (order.type === "courses") {
     return `
       <h3 style="color:#333;">Cours réservé</h3>
-      <p>Catégorie d’âge : ${m.ageGroup || "-"}</p>
-      <p>Type : ${m.courseType === "essai" ? "Cours d’essai" : "Cours réguliers"}</p>
+      <p>Catégorie d'âge : ${m.ageGroup || "-"}</p>
+      <p>Type : ${m.courseType === "essai" ? "Cours d'essai" : "Cours réguliers"}</p>
     `;
   }
   return "<p>Réservation confirmée.</p>";
@@ -107,30 +106,31 @@ const getOrderDetailsHtml = (order) => {
 // ────────────────── ROUTES ──────────────────
 app.get("/", (req, res) => res.send("Backend OK"));
 
-// NOUVELLE VERSION → accepte items[] (tableau) OU l'ancien format priceId + quantity
+// Création de la session Stripe
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
-    const { items, customerEmail, metadata = {} } = req.body;
+    const { items, priceId, quantity = 1, customerEmail, metadata = {} } = req.body;
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: "items manquant" });
+    let lineItems = [];
+
+    // Support nouveau format (items[]) ET ancien format (priceId)
+    if (items && Array.isArray(items) && items.length > 0) {
+      lineItems = items.map((item) => ({
+        price: item.price,
+        quantity: item.quantity || 1,
+      }));
+    } else if (priceId) {
+      lineItems = [{ price: priceId, quantity }];
+    } else {
+      return res.status(400).json({ error: "priceId ou items manquant" });
     }
 
-    // On ne touche PLUS à bookedPlaces ici → on ne réserve RIEN pour l’instant
-
-    const lineItems = items.map(item => ({
-      price: item.price,
-      quantity: item.quantity || 1,
-    }));
-
-    // On calcule juste le nombre de places demandées (pour le webhook plus tard)
-    let requestedPlaces = 0;
-    let eventId = null;
-
-    if (metadata.type === "traineeship") {
-      requestedPlaces = items.reduce((sum, item) => sum + (item.quantity || 1), 0);
-      eventId = `stage-${metadata.eventDate}`; // ex: stage-2025-07-15
+    if (lineItems.length === 0) {
+      return res.status(400).json({ error: "Aucun article à payer" });
     }
+
+    // Calcul du nombre de places demandées
+    const requestedPlaces = lineItems.reduce((sum, item) => sum + item.quantity, 0);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -145,20 +145,18 @@ app.post("/api/create-checkout-session", async (req, res) => {
       customer_email: customerEmail || undefined,
       metadata: {
         ...metadata,
-        eventId: eventId || "",
-        requestedPlaces: requestedPlaces.toString(), // ← crucial pour le webhook
-        tempReservation: "false", // on marque que c’est pas encore réservé
+        requestedPlaces: requestedPlaces.toString(),
       },
     });
 
     res.json({ url: session.url });
   } catch (error) {
     console.error("Erreur création session:", error.message);
-    res.status(500).json({ error: error.message || "Erreur serveur" });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Les autres routes restent IDENTIQUES
+// Récupérer une session
 app.get("/api/retrieve-session", async (req, res) => {
   try {
     const { session_id } = req.query;
@@ -187,6 +185,7 @@ app.get("/api/retrieve-session", async (req, res) => {
   }
 });
 
+// Liste des commandes
 app.get("/api/orders", async (req, res) => {
   try {
     const orders = await Order.find({})
@@ -223,7 +222,7 @@ app.get("/api/orders", async (req, res) => {
   }
 });
 
-// ────────────────── WEBHOOK (inchangé) ──────────────────
+// ────────────────── WEBHOOK STRIPE ──────────────────
 app.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
 
@@ -240,43 +239,164 @@ app.post("/webhook", async (req, res) => {
   }
 
   if (event.type === "checkout.session.completed") {
-  const session = event.data.object;
-  const metadata = session.metadata || {};
-  const type = metadata.type; // "traineeship", "show", "classic", "trial"
-  const quantity = parseInt(metadata.requestedPlaces || "1");
-  const eventId = metadata.eventId; // ton ID de stage, show ou cours
+    const session = event.data.object;
 
-  if (type === "traineeship" && eventId) {
-    await Traineeship.findByIdAndUpdate(eventId, {
-      $inc: { numberOfPlaces: -quantity }
+    console.log("Webhook reçu →", session.id, "| payment_status:", session.payment_status);
+
+    // Vérifier si la commande existe déjà
+    const exists = await Order.findOne({ stripeSessionId: session.id });
+    if (exists) {
+      console.log("Commande déjà existante →", session.id);
+      return res.json({ received: true });
+    }
+
+    const metadata = session.metadata || {};
+    const eventData = metadata.eventData ? JSON.parse(metadata.eventData || "null") : null;
+    const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
+
+    // Génération du numéro de commande
+    const year = new Date().getFullYear();
+    const count = await Order.countDocuments({
+      createdAt: { $gte: new Date(`${year}-01-01`) },
     });
+    const orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
+
+    // Création de la commande
+    const order = await new Order({
+      stripeSessionId: session.id,
+      orderNumber,
+      amountTotal: session.amount_total || 0,
+      currency: session.currency || "eur",
+      paymentStatus: "paid",
+      customer: {
+        name: metadata.nom || session.customer_details?.name || "Anonyme",
+        email: metadata.email || session.customer_details?.email || null,
+        phone: metadata.telephone || session.customer_details?.phone || null,
+      },
+      type: metadata.type,
+      metadata,
+      event: singleEvent
+        ? {
+            title: singleEvent.title || "Événement",
+            place: singleEvent.place || "Lieu inconnu",
+            date: singleEvent.date || "Date inconnue",
+            hours: singleEvent.hours || "Horaire inconnu",
+          }
+        : null,
+    }).save();
+
+    console.log("✅ COMMANDE CRÉÉE →", session.id, "| Numéro:", orderNumber);
+
+    // ────────────────── DÉCRÉMENTER LES PLACES DISPONIBLES ──────────────────
+    const type = metadata.type;
+    const eventId = metadata.eventId;
+    const requestedPlaces = parseInt(metadata.requestedPlaces || "1");
+
+    try {
+      if (type === "traineeship" && eventId) {
+        await Traineeship.findByIdAndUpdate(eventId, {
+          $inc: { numberOfPlaces: -requestedPlaces }
+        });
+        console.log(`✅ Stage ${eventId}: -${requestedPlaces} places`);
+      }
+
+      if (type === "show" && eventId) {
+        await Show.findByIdAndUpdate(eventId, {
+          $inc: { numberOfPlaces: -requestedPlaces }
+        });
+        console.log(`✅ Show ${eventId}: -${requestedPlaces} places`);
+      }
+
+      if (type === "classic" && eventId) {
+        await classicCourse.findByIdAndUpdate(eventId, {
+          $inc: { numberOfPlaces: -requestedPlaces }
+        });
+        console.log(`✅ Cours classique ${eventId}: -${requestedPlaces} places`);
+      }
+
+      if (type === "trial" && eventId) {
+        await trialCourse.findByIdAndUpdate(eventId, {
+          $inc: { numberOfPlaces: -requestedPlaces }
+        });
+        console.log(`✅ Cours d'essai ${eventId}: -${requestedPlaces} places`);
+      }
+    } catch (updateError) {
+      console.error("❌ Erreur mise à jour des places:", updateError.message);
+    }
+
+    // ────────────────── ENVOI DES EMAILS ──────────────────
+    const clientEmail = order.customer.email || session.customer_details?.email || metadata.email || null;
+
+    const confirmationUrl = `${
+      process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
+    }/success?session_id=${session.id}`;
+    const amountFormatted = (order.amountTotal / 100).toFixed(2);
+
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 12px; background:#fafafa;">
+        <h2 style="color:#28a745; text-align:center;">Réservation confirmée !</h2>
+        <p>Bonjour ${order.customer.name},</p>
+        <p>Nous avons bien reçu votre paiement. Voici le récapitulatif de votre réservation :</p>
+
+        <div style="background:white; padding:15px; border-radius:8px; margin:20px 0;">
+          <p><strong>Numéro de commande :</strong> ${orderNumber}</p>
+          <p><strong>Montant payé :</strong> ${amountFormatted} €</p>
+        </div>
+
+        ${getOrderDetailsHtml(order)}
+
+        <div style="text-align:center; margin:30px 0;">
+          <a href="${confirmationUrl}" style="background:#28a745; color:white; padding:14px 28px; text-decoration:none; border-radius:8px; font-weight:bold; font-size:16px;">
+            Voir ma réservation
+          </a>
+        </div>
+
+        <p>À très bientôt !</p>
+        <hr style="border:none; border-top:1px solid #eee; margin:30px 0;">
+        <small style="color:#888;">Ceci est un email automatique – ne pas répondre.</small>
+      </div>
+    `;
+
+    try {
+      // Email client
+      if (clientEmail && clientEmail.trim() !== "") {
+        await resend.emails.send({
+          from: "Modal Danse <hello@resend.dev>",
+          to: clientEmail.trim(),
+          subject: `Confirmation – ${order.orderNumber}`,
+          html: emailHtml,
+        });
+        console.log("✅ EMAIL CLIENT ENVOYÉ →", clientEmail.trim());
+      }
+
+      // Email admin
+      if (process.env.ADMIN_EMAIL && process.env.ADMIN_EMAIL.trim() !== "") {
+        await resend.emails.send({
+          from: "Modal Danse <hello@resend.dev>",
+          to: process.env.ADMIN_EMAIL,
+          subject: `Nouvelle commande – ${order.orderNumber}`,
+          html: `
+            <h2>Nouvelle réservation !</h2>
+            <p><strong>Numéro :</strong> ${order.orderNumber}</p>
+            <p><strong>Client :</strong> ${order.customer.name} – ${clientEmail || "non renseigné"}</p>
+            <p><strong>Téléphone :</strong> ${order.customer.phone || "-"}</p>
+            <p><strong>Montant :</strong> ${amountFormatted} €</p>
+            <p><strong>Type :</strong> ${order.type}</p>
+            ${getOrderDetailsHtml(order)}
+            <p><a href="${confirmationUrl}">Voir la réservation</a></p>
+          `,
+        });
+        console.log("✅ EMAIL ADMIN ENVOYÉ");
+      }
+    } catch (emailErr) {
+      console.error("❌ ERREUR RESEND :", emailErr.message);
+    }
   }
 
-  if (type === "show" && eventId) {
-    await Show.findByIdAndUpdate(eventId, {
-      $inc: { numberOfPlaces: -quantity }
-    });
-  }
-
-  if (type === "classic" && eventId) {
-    await classicCourse.findByIdAndUpdate(eventId, {
-      $inc: { numberOfPlaces: -quantity }
-    });
-  }
-
-  if (type === "trial" && eventId) {
-    await trialCourse.findByIdAndUpdate(eventId, {
-      $inc: { numberOfPlaces: -quantity }
-    });
-  }
-}
-
-
-  
   res.json({ received: true });
 });
 
-
+// ────────────────── ROUTES TRAINEESHIPS ──────────────────
 app.get("/api/traineeships", async (req, res) => {
   try {
     const stages = await Traineeship.find({}).sort({ date: 1 }).lean();
@@ -287,10 +407,9 @@ app.get("/api/traineeships", async (req, res) => {
   }
 });
 
-// Récupérer un stage par ID
 app.get("/api/traineeships/:id", async (req, res) => {
   try {
-    const stage = await Traineeship.findOne({ id: req.params.id }).lean();
+    const stage = await Traineeship.findById(req.params.id).lean();
     if (!stage) return res.status(404).json({ error: "Stage introuvable" });
     res.json(stage);
   } catch (err) {
@@ -299,7 +418,7 @@ app.get("/api/traineeships/:id", async (req, res) => {
   }
 });
 
-// Récupérer tous les shows
+// ────────────────── ROUTES SHOWS ──────────────────
 app.get("/api/shows", async (req, res) => {
   try {
     const shows = await Show.find({}).sort({ date: 1 }).lean();
@@ -310,10 +429,9 @@ app.get("/api/shows", async (req, res) => {
   }
 });
 
-// Récupérer un show par ID
 app.get("/api/shows/:id", async (req, res) => {
   try {
-    const show = await Show.findOne({ id: req.params.id }).lean();
+    const show = await Show.findById(req.params.id).lean();
     if (!show) return res.status(404).json({ error: "Spectacle introuvable" });
     res.json(show);
   } catch (err) {
@@ -322,7 +440,7 @@ app.get("/api/shows/:id", async (req, res) => {
   }
 });
 
-
+// ────────────────── ROUTES CLASSIC COURSES ──────────────────
 app.get("/api/classic-courses", async (req, res) => {
   try {
     const courses = await classicCourse.find({}).sort({ date: 1 }).lean();
@@ -344,6 +462,7 @@ app.get("/api/classic-courses/:id", async (req, res) => {
   }
 });
 
+// ────────────────── ROUTES TRIAL COURSES ──────────────────
 app.get("/api/trial-courses", async (req, res) => {
   try {
     const courses = await trialCourse.find({}).sort({ date: 1 }).lean();
@@ -364,7 +483,6 @@ app.get("/api/trial-courses/:id", async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
-
 
 // ────────────────── LANCEMENT ──────────────────
 const PORT = process.env.PORT || 4242;
