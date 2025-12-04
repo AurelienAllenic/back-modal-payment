@@ -7,7 +7,9 @@ const trialCourseSchema = new mongoose.Schema(
     place: { type: String, required: true },
     numberOfPlaces: { type: Number, default: 1 },
   },
-  { timestamps: true }
+  { timestamps: true,
+    collection: 'trialCourses'
+   }
 );
 
 module.exports = mongoose.model("TrialCourse", trialCourseSchema);
