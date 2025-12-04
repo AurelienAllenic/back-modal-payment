@@ -11,7 +11,9 @@ const showSchema = new mongoose.Schema(
     alt: { type: String },
     numberOfPlaces: { type: Number, default: 1 },
   },
-  { timestamps: true }
+  { timestamps: true,
+    collection: 'show'
+   }
 );
 
 module.exports = mongoose.model("Show", showSchema);
