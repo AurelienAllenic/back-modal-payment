@@ -7,7 +7,8 @@ const classicCourseSchema = new mongoose.Schema(
     place: { type: String, required: true },
     numberOfPlaces: { type: Number, default: 1 },
   },
-  { timestamps: true }
+  { timestamps: true,
+    collection: 'classicCourses' }
 );
 
 module.exports = mongoose.model("ClassicCourse", classicCourseSchema);
