@@ -230,118 +230,187 @@ app.post("/webhook", async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  // ===============================================
+  // PAIEMENT RÉUSSI → ON TRAITE LA RÉSERVATION
+  // ===============================================
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
 
     console.log("Webhook reçu →", session.id, "| payment_status:", session.payment_status);
 
+    // Éviter les doublons
     const exists = await Order.findOne({ stripeSessionId: session.id });
     if (exists) {
-      console.log("Commande déjà existante →", session.id);
+      console.log("Commande déjà traitée →", session.id);
       return res.json({ received: true });
     }
 
     const metadata = session.metadata || {};
-    const eventData = metadata.eventData ? JSON.parse(metadata.eventData || "null") : null;
-    const singleEvent = Array.isArray(eventData) ? eventData[0] : eventData;
+    const type = metadata.type;
+    const eventId = metadata.eventId; // À envoyer depuis le front !
 
-    const year = new Date().getFullYear();
-    const count = await Order.countDocuments({
-      createdAt: { $gte: new Date(`${year}-01-01`) },
-    });
-    const orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
+    // Sécurité : on refuse si on n'a pas l'ID de l'événement
+    if (!type || !eventId) {
+      console.error("eventId ou type manquant dans metadata", metadata);
+      return res.json({ received: true });
+    }
 
-    const order = await new Order({
-      stripeSessionId: session.id,
-      orderNumber,
-      amountTotal: session.amount_total || 0,
-      currency: session.currency || "eur",
-      paymentStatus: "paid",
-      customer: {
-        name: metadata.nom || session.customer_details?.name || "Anonyme",
-        email: metadata.email || session.customer_details?.email || null,
-        phone: metadata.telephone || session.customer_details?.phone || null,
-      },
-      type: metadata.type,
-      metadata,
-      event: singleEvent
-        ? {
-            title: singleEvent.title || "Événement",
-            place: singleEvent.place || "Lieu inconnu",
-            date: singleEvent.date || "Date inconnue",
-            hours: singleEvent.hours || "Horaire inconnu",
-          }
-        : null,
-    }).save();
+    // Sélection du modèle
+    let Model;
+    if (type === "traineeship") Model = Traineeship;
+    else if (type === "show") Model = Show;
+    else if (type === "courses") {
+      Model = metadata.courseType === "essai" ? TrialCourse : ClassicCourse;
+    } else {
+      console.error("Type inconnu :", type);
+      return res.json({ received: true });
+    }
 
-    console.log("COMMANDE CRÉÉE →", session.id, "| Numéro:", orderNumber);
+    // Calcul du nombre de places à réserver
+    let placesToBook = 0;
+    if (type === "traineeship") {
+      placesToBook = parseInt(metadata.nombreParticipants, 10) || 1;
+    } else if (type === "show") {
+      const adultes = parseInt(metadata.adultes, 10) || 0;
+      const enfants = parseInt(metadata.enfants, 10) || 0;
+      placesToBook = adultes + enfants;
+    } else if (type === "courses") {
+      placesToBook = 1;
+    }
 
-    const clientEmail = order.customer.email || session.customer_details?.email || metadata.email || null;
-
-    const confirmationUrl = `${
-      process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
-    }/success?session_id=${session.id}`;
-    const amountFormatted = (order.amountTotal / 100).toFixed(2);
-
-    const emailHtml = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 12px; background:#fafafa;">
-        <h2 style="color:#28a745; text-align:center;">Réservation confirmée !</h2>
-        <p>Bonjour ${order.customer.name},</p>
-        <p>Nous avons bien reçu votre paiement. Voici le récapitulatif de votre réservation :</p>
-
-        <div style="background:white; padding:15px; border-radius:8px; margin:20px 0;">
-          <p><strong>Numéro de commande :</strong> ${orderNumber}</p>
-          <p><strong>Montant payé :</strong> ${amountFormatted} €</p>
-        </div>
-
-        ${getOrderDetailsHtml(order)}
-
-        <div style="text-align:center; margin:30px 0;">
-          <a href="${confirmationUrl}" style="background:#28a745; color:white; padding:14px 28px; text-decoration:none; border-radius:8px; font-weight:bold; font-size:16px;">
-            Voir ma réservation
-          </a>
-        </div>
-
-        <p>À très bientôt !</p>
-        <hr style="border:none; border-top:1px solid #eee; margin:30px 0;">
-        <small style="color:#888;">Ceci est un email automatique – ne pas répondre.</small>
-      </div>
-    `;
+    if (placesToBook <= 0) {
+      console.error("Nombre de places invalide", metadata);
+      return res.json({ received: true });
+    }
 
     try {
-      if (clientEmail && clientEmail.trim() !== "") {
-        await resend.emails.send({
-          from: "Modal Danse <hello@resend.dev>",
-          to: clientEmail.trim(),
-          subject: `Confirmation – ${order.orderNumber}`,
-          html: emailHtml,
-        });
-        console.log("EMAIL CLIENT ENVOYÉ →", clientEmail.trim());
+      // RÉSERVATION ATOMIQUE : on ne touche à rien si pas assez de places
+      const updatedEvent = await Model.findOneAndUpdate(
+        {
+          _id: eventId,
+          numberOfPlaces: { $gte: placesToBook } // C'EST LA SÉCURITÉ ANTI-SURBOOKING
+        },
+        {
+          $inc: { numberOfPlaces: -placesToBook }
+        },
+        { new: true }
+      );
+
+      // PLUS DE PLACES → REMBOURSEMENT AUTOMATIQUE
+      if (!updatedEvent) {
+        console.warn(`Plus de places → remboursement session ${session.id}`);
+
+        if (session.payment_intent) {
+          await stripe.refunds.create({
+            payment_intent: session.payment_intent,
+          });
+        }
+
+        const clientEmail = metadata.email || session.customer_details?.email;
+        if (clientEmail?.trim()) {
+          await resend.emails.send({
+            from: "Modal Danse <hello@resend.dev>",
+            to: clientEmail.trim(),
+            subject: "Réservation impossible – places épuisées",
+            html: `
+              <p>Bonjour ${metadata.nom || ""},</p>
+              <p>Nous sommes vraiment désolés : les dernières places ont été prises juste avant votre paiement.</p>
+              <p>Vous avez été remboursé(e) intégralement (${(session.amount_total / 100).toFixed(2)} €).</p>
+              <p>À très vite pour un autre événement !</p>
+              <p>L'équipe Modal Danse</p>
+            `,
+          });
+        }
+        return res.json({ received: true });
       }
 
-      if (process.env.ADMIN_EMAIL && process.env.ADMIN_EMAIL.trim() !== "") {
+      // TOUT EST OK → ON CRÉE LA COMMANDE
+      const year = new Date().getFullYear();
+      const count = await Order.countDocuments({
+        createdAt: { $gte: new Date(`${year}-01-01`) },
+      });
+      const orderNumber = `CMD-${year}-${String(count + 1).padStart(5, "0")}`;
+
+      const order = await new Order({
+        stripeSessionId: session.id,
+        orderNumber,
+        amountTotal: session.amount_total || 0,
+        currency: session.currency || "eur",
+        paymentStatus: "paid",
+        customer: {
+          name: metadata.nom || session.customer_details?.name || "Anonyme",
+          email: metadata.email || session.customer_details?.email || null,
+          phone: metadata.telephone || session.customer_details?.phone || null,
+        },
+        type: metadata.type,
+        metadata,
+        event: {
+          title: updatedEvent.title,
+          place: updatedEvent.place,
+          date: updatedEvent.date,
+          hours: updatedEvent.hours,
+        },
+      }).save();
+
+      console.log(`RÉSERVATION VALIDÉE → ${orderNumber} | ${placesToBook} place(s) | reste ${updatedEvent.numberOfPlaces}`);
+
+      const confirmationUrl = `${
+        process.env.FRONTEND_URL || "https://modal-payment.vercel.app"
+      }/success?session_id=${session.id}`;
+      const amountFormatted = (order.amountTotal / 100).toFixed(2);
+
+      const emailHtml = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #e0e0; border-radius: 12px; background:#fafafa;">
+          <h2 style="color:#28a745; text-align:center;">Réservation confirmée !</h2>
+          <p>Bonjour ${order.customer.name},</p>
+          <p>Nous avons bien reçu votre paiement. Voici votre réservation :</p>
+          <div style="background:white; padding:15px; border-radius:8px; margin:20px 0;">
+            <p><strong>Numéro :</strong> ${orderNumber}</p>
+            <p><strong>Montant :</strong> ${amountFormatted} €</p>
+          </div>
+          ${getOrderDetailsHtml(order)}
+          <div style="text-align:center; margin:30px 0;">
+            <a href="${confirmationUrl}" style="background:#28a745; color:white; padding:14px 28px; text-decoration:none; border-radius:8px; font-weight:bold;">Voir ma réservation</a>
+          </div>
+          <p>À très bientôt !</p>
+        </div>
+      `;
+
+      // Email client
+      if (order.customer.email) {
         await resend.emails.send({
           from: "Modal Danse <hello@resend.dev>",
-          to: process.env.ADMIN_EMAIL,
-          subject: `Nouvelle commande – ${order.orderNumber}`,
+          to: order.customer.email.trim(),
+          subject: `Confirmation – ${orderNumber}`,
+          html: emailHtml,
+        });
+      }
+
+      // Email admin
+      if (process.env.ADMIN_EMAIL?.trim()) {
+        await resend.emails.send({
+          from: "Modal Danse <hello@resend.dev>",
+          to: process.env.ADMIN_EMAIL.trim(),
+          subject: `Nouvelle réservation – ${orderNumber}`,
           html: `
-            <h2>Nouvelle réservation !</h2>
-            <p><strong>Numéro :</strong> ${order.orderNumber}</p>
-            <p><strong>Client :</strong> ${order.customer.name} – ${clientEmail || "non renseigné"}</p>
-            <p><strong>Téléphone :</strong> ${order.customer.phone || "-"}</p>
-            <p><strong>Montant :</strong> ${amountFormatted} €</p>
-            <p><strong>Type :</strong> ${order.type}</p>
+            <h2>Nouvelle réservation</h2>
+            <p><strong>${orderNumber}</strong> – ${order.customer.name}</p>
+            <p>${placesToBook} place(s) → ${updatedEvent.title}</p>
+            <p>Reste ${updatedEvent.numberOfPlaces} places</p>
             ${getOrderDetailsHtml(order)}
-            <p><a href="${confirmationUrl}">Voir la réservation</a></p>
           `,
         });
-        console.log("EMAIL ADMIN ENVOYÉ");
       }
-    } catch (emailErr) {
-      console.error("ERREUR RESEND :", emailErr.message);
+
+    } catch (error) {
+      console.error("Erreur critique webhook :", error);
+      if (session.payment_intent) {
+        try { await stripe.refunds.create({ payment_intent: session.payment_intent }); } catch {}
+      }
     }
   }
 
+  // On répond toujours à Stripe
   res.json({ received: true });
 });
 
