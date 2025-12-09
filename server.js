@@ -62,7 +62,7 @@ const orderSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["traineeship", "show", "courses", "trial-course", "classic-course"], // ✅ AJOUT DES NOUVEAUX TYPES
+      enum: ["traineeship", "show", "courses", "trial-course", "classic-course"],
       required: true,
     },
     metadata: mongoose.Schema.Types.Mixed,
@@ -206,7 +206,7 @@ app.get("/api/orders", async (req, res) => {
         type: order.type,
         eventTitle: order.event?.title || "—",
         status: order.paymentStatus,
-        metadata: order.metadata || {}, // ✅ AJOUT DES MÉTADONNÉES
+        metadata: order.metadata || {},
       })),
     });
   } catch (error) {
@@ -237,9 +237,6 @@ app.post("/webhook", async (req, res) => {
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
 
-    console.log("Webhook reçu →", session.id, "| payment_status:", session.payment_status);
-
-    // Éviter les doublons
     const exists = await Order.findOne({ stripeSessionId: session.id });
     if (exists) {
       console.log("Commande déjà traitée →", session.id);
@@ -248,15 +245,13 @@ app.post("/webhook", async (req, res) => {
 
     const metadata = session.metadata || {};
     const type = metadata.type;
-    const eventId = metadata.eventId; // À envoyer depuis le front !
+    const eventId = metadata.eventId;
 
-    // Sécurité : on refuse si on n'a pas l'ID de l'événement
     if (!type || !eventId) {
       console.error("eventId ou type manquant dans metadata", metadata);
       return res.json({ received: true });
     }
 
-    // Sélection du modèle
     let Model;
     if (type === "traineeship") Model = Traineeship;
     else if (type === "show") Model = Show;
@@ -267,7 +262,6 @@ app.post("/webhook", async (req, res) => {
       return res.json({ received: true });
     }
 
-    // Calcul du nombre de places à réserver
     let placesToBook = 0;
     if (type === "traineeship") {
       placesToBook = parseInt(metadata.nombreParticipants, 10) || 1;
@@ -285,11 +279,10 @@ app.post("/webhook", async (req, res) => {
     }
 
     try {
-      // RÉSERVATION ATOMIQUE : on ne touche à rien si pas assez de places
       const updatedEvent = await Model.findOneAndUpdate(
         {
           _id: eventId,
-          numberOfPlaces: { $gte: placesToBook } // C'EST LA SÉCURITÉ ANTI-SURBOOKING
+          numberOfPlaces: { $gte: placesToBook }
         },
         {
           $inc: { numberOfPlaces: -placesToBook }
@@ -297,7 +290,6 @@ app.post("/webhook", async (req, res) => {
         { new: true }
       );
 
-      // PLUS DE PLACES → REMBOURSEMENT AUTOMATIQUE
       if (!updatedEvent) {
         console.warn(`Plus de places → remboursement session ${session.id}`);
 
@@ -325,7 +317,6 @@ app.post("/webhook", async (req, res) => {
         return res.json({ received: true });
       }
 
-      // TOUT EST OK → ON CRÉE LA COMMANDE
       const year = new Date().getFullYear();
       const count = await Order.countDocuments({
         createdAt: { $gte: new Date(`${year}-01-01`) },
@@ -343,7 +334,6 @@ app.post("/webhook", async (req, res) => {
           email: metadata.email || session.customer_details?.email || null,
           phone: metadata.telephone || session.customer_details?.phone || null,
         },
-        // ✅ AJUSTER LE TYPE SELON LE courseType pour les cours
         type: metadata.type === "courses" && metadata.courseType === "essai" 
           ? "trial-course" 
           : metadata.type === "courses" 
@@ -382,7 +372,6 @@ app.post("/webhook", async (req, res) => {
         </div>
       `;
 
-      // Email client
       if (order.customer.email) {
         await resend.emails.send({
           from: "Modal Danse <hello@resend.dev>",
@@ -392,7 +381,6 @@ app.post("/webhook", async (req, res) => {
         });
       }
 
-      // Email admin
       if (process.env.ADMIN_EMAIL?.trim()) {
         await resend.emails.send({
           from: "Modal Danse <hello@resend.dev>",
@@ -416,7 +404,6 @@ app.post("/webhook", async (req, res) => {
     }
   }
 
-  // On répond toujours à Stripe
   res.json({ received: true });
 });
 
@@ -509,7 +496,7 @@ app.get("/api/trial-courses/:id", async (req, res) => {
 });
 
 // ────────────────── ROUTES ADMIN CAPACITIES ──────────────────
-// Récupérer tous les événements de tous types
+
 app.get("/api/admin/events", async (req, res) => {
   try {
     const traineeships = await Traineeship.find({}).sort({ date: 1 }).lean();
@@ -563,7 +550,6 @@ app.get("/api/admin/events", async (req, res) => {
   }
 });
 
-// Mettre à jour le nombre de places d'un événement
 app.put("/api/admin/events/:type/:id", async (req, res) => {
   try {
     const { type, id } = req.params;

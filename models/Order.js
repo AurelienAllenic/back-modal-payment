@@ -3,53 +3,39 @@ const mongoose = require("mongoose");
 
 const orderSchema = new mongoose.Schema(
   {
-    // Stripe Session ID
     stripeSessionId: {
       type: String,
       required: true,
       unique: true,
     },
-
-    // Command Number
     orderNumber: {
       type: String,
       unique: true,
-      sparse: true, // Allow null for previous orders
+      sparse: true,
     },
-
-    // Payment status
     paymentStatus: {
       type: String,
       enum: ["pending", "succeeded", "failed", "refunded"],
       default: "succeeded",
     },
-
-    // Cents total amount paid
     amountTotal: {
       type: Number,
       required: true,
     },
-
     currency: {
       type: String,
       default: "eur",
     },
-
-    // === Customer Information ===
     customer: {
       name: { type: String, required: true },
       email: { type: String, required: true, lowercase: true },
       phone: { type: String, default: null },
     },
-
-    // === Type of product purchased ===
     type: {
       type: String,
       enum: ["traineeship", "show", "courses"],
       required: true,
     },
-
-    // === Common data ===
     metadata: {
       nom: String,
       email: String,
@@ -58,9 +44,8 @@ const orderSchema = new mongoose.Schema(
       adultes: Number,
       enfants: Number,
       ageGroup: String,
-      courseType: String, // "trial" | "classic"
+      courseType: String,
       totalPrice: Number,
-      // Keep JSON stringified if needed (or parse into sub-objects)
       trialCourse: mongoose.Schema.Types.Mixed,
       classicCourses: mongoose.Schema.Types.Mixed,
     },
@@ -72,8 +57,6 @@ const orderSchema = new mongoose.Schema(
       date: String,
       hours: String,
     },
-
-    // Creation date of the order
     createdAt: {
       type: Date,
       default: Date.now,
@@ -84,11 +67,9 @@ const orderSchema = new mongoose.Schema(
   }
 );
 
-// Index for quick search by sessionId or orderNumber
 orderSchema.index({ stripeSessionId: 1 });
 orderSchema.index({ orderNumber: 1 });
 
-// Generate a readable order number (ex: CMD-2025-00421)
 orderSchema.pre("save", async function (next) {
   if (!this.orderNumber && this.isNew) {
     const year = new Date().getFullYear();
