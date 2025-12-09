@@ -62,7 +62,7 @@ const orderSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["traineeship", "show", "courses"],
+      enum: ["traineeship", "show", "courses", "trial-course", "classic-course"], // ✅ AJOUT DES NOUVEAUX TYPES
       required: true,
     },
     metadata: mongoose.Schema.Types.Mixed,
@@ -206,6 +206,7 @@ app.get("/api/orders", async (req, res) => {
         type: order.type,
         eventTitle: order.event?.title || "—",
         status: order.paymentStatus,
+        metadata: order.metadata || {}, // ✅ AJOUT DES MÉTADONNÉES
       })),
     });
   } catch (error) {
@@ -342,7 +343,12 @@ app.post("/webhook", async (req, res) => {
           email: metadata.email || session.customer_details?.email || null,
           phone: metadata.telephone || session.customer_details?.phone || null,
         },
-        type: metadata.type,
+        // ✅ AJUSTER LE TYPE SELON LE courseType pour les cours
+        type: metadata.type === "courses" && metadata.courseType === "essai" 
+          ? "trial-course" 
+          : metadata.type === "courses" 
+            ? "classic-course" 
+            : metadata.type,
         metadata,
         event: {
           title: updatedEvent.title,
@@ -499,6 +505,95 @@ app.get("/api/trial-courses/:id", async (req, res) => {
   } catch (err) {
     console.error("Erreur /api/trial-courses/:id:", err);
     res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// ────────────────── ROUTES ADMIN CAPACITIES ──────────────────
+// Récupérer tous les événements de tous types
+app.get("/api/admin/events", async (req, res) => {
+  try {
+    const traineeships = await Traineeship.find({}).sort({ date: 1 }).lean();
+    const shows = await Show.find({}).sort({ date: 1 }).lean();
+    const classicCourses = await ClassicCourse.find({}).sort({ date: 1 }).lean();
+    const trialCourses = await TrialCourse.find({}).sort({ date: 1 }).lean();
+
+    res.json({
+      success: true,
+      data: {
+        traineeships: traineeships.map(t => ({
+          _id: t._id,
+          type: 'traineeship',
+          title: t.title,
+          date: t.date,
+          place: t.place,
+          hours: t.hours,
+          numberOfPlaces: t.numberOfPlaces || 0,
+        })),
+        shows: shows.map(s => ({
+          _id: s._id,
+          type: 'show',
+          title: s.title,
+          date: s.date,
+          place: s.place,
+          hours: s.hours,
+          numberOfPlaces: s.numberOfPlaces || 0,
+        })),
+        classicCourses: classicCourses.map(c => ({
+          _id: c._id,
+          type: 'classic-course',
+          day: c.day,
+          time: c.time,
+          place: c.place,
+          date: c.date,
+          numberOfPlaces: c.numberOfPlaces || 0,
+        })),
+        trialCourses: trialCourses.map(c => ({
+          _id: c._id,
+          type: 'trial-course',
+          time: c.time,
+          place: c.place,
+          date: c.date,
+          numberOfPlaces: c.numberOfPlaces || 0,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error("Erreur /api/admin/events:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Mettre à jour le nombre de places d'un événement
+app.put("/api/admin/events/:type/:id", async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    const { numberOfPlaces } = req.body;
+
+    if (numberOfPlaces === undefined || numberOfPlaces < 0) {
+      return res.status(400).json({ error: "numberOfPlaces invalide" });
+    }
+
+    let Model;
+    if (type === 'traineeship') Model = Traineeship;
+    else if (type === 'show') Model = Show;
+    else if (type === 'classic-course') Model = ClassicCourse;
+    else if (type === 'trial-course') Model = TrialCourse;
+    else return res.status(400).json({ error: "Type inconnu" });
+
+    const updated = await Model.findByIdAndUpdate(
+      id,
+      { numberOfPlaces: Number(numberOfPlaces) },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: "Événement introuvable" });
+    }
+
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    console.error("Erreur /api/admin/events/:type/:id:", err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
