@@ -300,20 +300,21 @@ app.post("/webhook", async (req, res) => {
         }
 
         const clientEmail = metadata.email || session.customer_details?.email;
-        if (clientEmail?.trim()) {
-          await resend.emails.send({
-            from: "Modal Danse <hello@resend.dev>",
-            to: clientEmail.trim(),
-            subject: "Réservation impossible – places épuisées",
-            html: `
-              <p>Bonjour ${metadata.nom || ""},</p>
-              <p>Nous sommes vraiment désolés : les dernières places ont été prises juste avant votre paiement.</p>
-              <p>Vous avez été remboursé(e) intégralement (${(session.amount_total / 100).toFixed(2)} €).</p>
-              <p>À très vite pour un autre événement !</p>
-              <p>L'équipe Modal Danse</p>
-            `,
-          });
-        }
+        // ❌ DÉSACTIVÉ : Envoi d'email de remboursement
+        // if (clientEmail?.trim()) {
+        //   await resend.emails.send({
+        //     from: "Modal Danse <hello@resend.dev>",
+        //     to: clientEmail.trim(),
+        //     subject: "Réservation impossible – places épuisées",
+        //     html: `
+        //       <p>Bonjour ${metadata.nom || ""},</p>
+        //       <p>Nous sommes vraiment désolés : les dernières places ont été prises juste avant votre paiement.</p>
+        //       <p>Vous avez été remboursé(e) intégralement (${(session.amount_total / 100).toFixed(2)} €).</p>
+        //       <p>À très vite pour un autre événement !</p>
+        //       <p>L'équipe Modal Danse</p>
+        //     `,
+        //   });
+        // }
         return res.json({ received: true });
       }
 
@@ -372,29 +373,31 @@ app.post("/webhook", async (req, res) => {
         </div>
       `;
 
-      if (order.customer.email) {
-        await resend.emails.send({
-          from: "Modal Danse <hello@resend.dev>",
-          to: order.customer.email.trim(),
-          subject: `Confirmation – ${orderNumber}`,
-          html: emailHtml,
-        });
-      }
+      // ❌ DÉSACTIVÉ : Envoi d'email de confirmation au client
+      // if (order.customer.email) {
+      //   await resend.emails.send({
+      //     from: "Modal Danse <hello@resend.dev>",
+      //     to: order.customer.email.trim(),
+      //     subject: `Confirmation – ${orderNumber}`,
+      //     html: emailHtml,
+      //   });
+      // }
 
-      if (process.env.ADMIN_EMAIL?.trim()) {
-        await resend.emails.send({
-          from: "Modal Danse <hello@resend.dev>",
-          to: process.env.ADMIN_EMAIL.trim(),
-          subject: `Nouvelle réservation – ${orderNumber}`,
-          html: `
-            <h2>Nouvelle réservation</h2>
-            <p><strong>${orderNumber}</strong> – ${order.customer.name}</p>
-            <p>${placesToBook} place(s) → ${updatedEvent.title}</p>
-            <p>Reste ${updatedEvent.numberOfPlaces} places</p>
-            ${getOrderDetailsHtml(order)}
-          `,
-        });
-      }
+      // ❌ DÉSACTIVÉ : Envoi d'email de notification à l'admin
+      // if (process.env.ADMIN_EMAIL?.trim()) {
+      //   await resend.emails.send({
+      //     from: "Modal Danse <hello@resend.dev>",
+      //     to: process.env.ADMIN_EMAIL.trim(),
+      //     subject: `Nouvelle réservation – ${orderNumber}`,
+      //     html: `
+      //       <h2>Nouvelle réservation</h2>
+      //       <p><strong>${orderNumber}</strong> – ${order.customer.name}</p>
+      //       <p>${placesToBook} place(s) → ${updatedEvent.title}</p>
+      //       <p>Reste ${updatedEvent.numberOfPlaces} places</p>
+      //       ${getOrderDetailsHtml(order)}
+      //     `,
+      //   });
+      // }
 
     } catch (error) {
       console.error("Erreur critique webhook :", error);
